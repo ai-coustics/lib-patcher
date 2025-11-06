@@ -6,14 +6,24 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Path to the original mylib static library
-    let mylib_path = manifest_dir
-        .parent()
-        .unwrap()
-        .join("mylib/target/release/libmylib.a");
-
-    // Path where we'll put the patched library
-    let patched_lib = out_dir.join("libmylib_patched.a");
+    // Path to the original mylib static library (platform-specific naming)
+    let (mylib_path, patched_lib) = if cfg!(target_os = "windows") {
+        (
+            manifest_dir
+                .parent()
+                .unwrap()
+                .join("mylib/target/release/mylib.lib"),
+            out_dir.join("mylib_patched.lib"),
+        )
+    } else {
+        (
+            manifest_dir
+                .parent()
+                .unwrap()
+                .join("mylib/target/release/libmylib.a"),
+            out_dir.join("libmylib_patched.a"),
+        )
+    };
 
     if !mylib_path.exists() {
         panic!(
