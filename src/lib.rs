@@ -216,6 +216,8 @@ fn patch_coff_object(
                 .map(|&s| SymbolSection::Section(s))
                 .unwrap_or(SymbolSection::Undefined),
             object::SymbolSection::Undefined => SymbolSection::Undefined,
+            object::SymbolSection::Absolute => SymbolSection::Absolute,
+            object::SymbolSection::Common => SymbolSection::Common,
             _ => SymbolSection::Undefined,
         };
 
