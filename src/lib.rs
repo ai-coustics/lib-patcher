@@ -200,11 +200,15 @@ fn patch_coff_object(
 
         let name = symbol.name().unwrap_or("").to_string();
 
+        // Always keep special MSVC symbols (like @feat.00)
+        let is_special_symbol = name.starts_with('@');
+
         // Determine if this symbol should be kept as global
-        let keep_global = match mode {
-            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove } => !remove.contains(&name),
-        };
+        let keep_global = is_special_symbol
+            || match mode {
+                FilterMode::Allowlist { prefix } => name.starts_with(prefix),
+                FilterMode::Blocklist { remove } => !remove.contains(&name),
+            };
 
         let section = match symbol.section() {
             object::SymbolSection::Section(idx) => section_map
