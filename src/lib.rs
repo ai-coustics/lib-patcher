@@ -350,18 +350,60 @@ fn patch_macos(
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let symbols_file = out_dir.join("symbols.txt");
 
-    // Debug: Check what's in the original static library
-    let ar_list = Command::new("ar")
-        .arg("-t")
+    // Extract object files from archive to run nm on them (avoids LLVM version mismatch)
+    let extract_dir = out_dir.join(format!("{}_objs", lib_name));
+    fs::create_dir_all(&extract_dir).expect("Failed to create extract dir");
+
+    let extract_status = Command::new("ar")
+        .arg("-x")
         .arg(static_lib)
-        .output()
-        .expect("Failed to run ar -t");
+        .current_dir(&extract_dir)
+        .status()
+        .expect("Failed to extract archive");
+    assert!(extract_status.success(), "ar -x failed");
+
+    // Get all symbols from the extracted object files
+    let mut all_symbols = Vec::new();
+    for entry in fs::read_dir(&extract_dir).expect("Failed to read extract dir") {
+        let entry = entry.expect("Failed to read dir entry");
+        let path = entry.path();
+
+        if !path.is_file() || path.file_name().unwrap() == "__.SYMDEF" {
+            continue;
+        }
+
+        let nm_out = Command::new("nm")
+            .args(["-g", "-U"])
+            .arg(&path)
+            .output()
+            .expect("Failed to run nm");
+
+        if nm_out.status.success() {
+            let symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 && parts[1].chars().any(|c| c.is_uppercase()) {
+                        Some(parts[2].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            all_symbols.extend(symbols);
+        }
+    }
+
+    // Remove duplicates
+    all_symbols.sort();
+    all_symbols.dedup();
+
     eprintln!(
-        "DEBUG: ar -t output:\n{}",
-        String::from_utf8_lossy(&ar_list.stdout)
+        "DEBUG: Found {} unique symbols from object files",
+        all_symbols.len()
     );
 
-    // Partial link with platform version (required on newer macOS)
+    // Now create the intermediate object with ld -r
     let output = Command::new("ld")
         .arg("-arch")
         .arg(arch)
@@ -378,52 +420,7 @@ fn patch_macos(
         .expect("Failed to run ld");
 
     eprintln!("DEBUG: ld exit status: {}", output.status);
-    eprintln!(
-        "DEBUG: ld stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    eprintln!("DEBUG: intermediate file exists: {}", intermediate.exists());
-
     assert!(output.status.success(), "ld -r failed");
-
-    // Get all defined global symbols
-    // Use llvm-nm instead of system nm to avoid LLVM version mismatch issues
-    // Try to find llvm-nm from rustc's sysroot first, then fall back to system nm
-    let nm_cmd = find_llvm_tool("llvm-nm").unwrap_or_else(|| "nm".to_string());
-
-    let nm_out = Command::new(&nm_cmd)
-        .args(["--defined-only", "--extern-only"])
-        .arg(&intermediate)
-        .output()
-        .expect("Failed to run nm");
-
-    eprintln!("DEBUG: Using nm command: {}", nm_cmd);
-    eprintln!("DEBUG: nm exit status: {}", nm_out.status);
-    eprintln!(
-        "DEBUG: nm stderr: {}",
-        String::from_utf8_lossy(&nm_out.stderr)
-    );
-    eprintln!("DEBUG: nm stdout length: {}", nm_out.stdout.len());
-
-    let all_symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[1].chars().any(|c| c.is_uppercase()) {
-                Some(parts[2].to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Debug: print all symbols found
-    eprintln!("DEBUG: Found {} symbols total", all_symbols.len());
-    if all_symbols.len() <= 20 {
-        for sym in &all_symbols {
-            eprintln!("DEBUG: Symbol: {}", sym);
-        }
-    }
 
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
@@ -494,6 +491,7 @@ fn patch_macos(
     fs::remove_file(&intermediate).ok();
     fs::remove_file(&final_obj).ok();
     fs::remove_file(&symbols_file).ok();
+    fs::remove_dir_all(&extract_dir).ok();
 }
 
 // Linux/Android: Use ld -r + objcopy
