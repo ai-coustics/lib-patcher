@@ -22,11 +22,25 @@ fn find_llvm_tool(tool_name: &str) -> Option<String> {
     }
 
     let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let mut tool_path = PathBuf::from(sysroot);
-    tool_path.push("lib");
-    tool_path.push("rustlib");
+    eprintln!("DEBUG: rustc sysroot: {}", sysroot);
 
-    // Get the host triple
+    // Try multiple possible locations for llvm-nm
+    // Location 1: bin/ (toolchains installed via rustup)
+    let mut tool_path = PathBuf::from(&sysroot);
+    tool_path.push("bin");
+    tool_path.push(tool_name);
+
+    eprintln!(
+        "DEBUG: Checking for {} at: {}",
+        tool_name,
+        tool_path.display()
+    );
+    if tool_path.exists() {
+        eprintln!("DEBUG: Found {} at: {}", tool_name, tool_path.display());
+        return Some(tool_path.to_string_lossy().to_string());
+    }
+
+    // Location 2: lib/rustlib/<triple>/bin/
     let host_output = Command::new("rustc").args(["-vV"]).output().ok()?;
 
     let host_triple = String::from_utf8_lossy(&host_output.stdout)
@@ -35,13 +49,23 @@ fn find_llvm_tool(tool_name: &str) -> Option<String> {
         .strip_prefix("host: ")?
         .to_string();
 
+    let mut tool_path = PathBuf::from(&sysroot);
+    tool_path.push("lib");
+    tool_path.push("rustlib");
     tool_path.push(host_triple);
     tool_path.push("bin");
     tool_path.push(tool_name);
 
+    eprintln!(
+        "DEBUG: Checking for {} at: {}",
+        tool_name,
+        tool_path.display()
+    );
     if tool_path.exists() {
+        eprintln!("DEBUG: Found {} at: {}", tool_name, tool_path.display());
         Some(tool_path.to_string_lossy().to_string())
     } else {
+        eprintln!("DEBUG: {} not found in any location", tool_name);
         None
     }
 }
