@@ -9,40 +9,96 @@ use object::{
     Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SymbolFlags, SymbolKind,
 };
 
-/// Patches a static library to hide all symbols except those matching the given prefix.
+/// Filtering strategy for symbol visibility
+#[derive(Debug, Clone)]
+pub enum FilterMode {
+    /// Keep ONLY symbols matching the prefix. Hide everything else.
+    ///
+    /// Use this when you control the library and want maximum safety.
+    /// All public functions MUST start with your prefix.
+    Allowlist { prefix: String },
+
+    /// Remove ONLY the listed symbols. Keep everything else.
+    ///
+    /// Use this for third-party libraries where you can't change function names.
+    Blocklist { remove: Vec<String> },
+}
+
+impl FilterMode {
+    /// Default blocklist of common problematic Rust stdlib symbols
+    ///
+    /// Includes:
+    /// - `rust_eh_personality` - Exception handling (main conflict source)
+    /// - `__rust_no_alloc_shim_is_unstable` - Allocation shim marker
+    /// - `__rust_alloc`, `__rust_dealloc`, `__rust_realloc` - Allocator functions
+    /// - `__rust_alloc_zeroed` - Zero-initialized allocation
+    ///
+    /// These symbols commonly conflict when linking multiple Rust staticlibs.
+    pub fn default_blocklist() -> Self {
+        FilterMode::Blocklist {
+            remove: vec![
+                "rust_eh_personality".to_string(),
+                "__rust_no_alloc_shim_is_unstable".to_string(),
+                "__rust_alloc".to_string(),
+                "__rust_dealloc".to_string(),
+                "__rust_realloc".to_string(),
+                "__rust_alloc_zeroed".to_string(),
+                "__rust_alloc_error_handler".to_string(),
+            ],
+        }
+    }
+}
+
+/// Patches a static library to filter symbols based on the specified mode.
 ///
 /// # Arguments
 ///
 /// * `static_lib` - Path to the input static library (e.g., `libmylib.a`)
 /// * `out_dir` - Directory for temporary files (use `$OUT_DIR` in build.rs)
 /// * `lib_name` - Base name for temporary files (e.g., "mylib")
-/// * `symbol_prefix` - Prefix for symbols to keep (e.g., "mylib_")
+/// * `mode` - Filtering mode (Allowlist or Blocklist)
 /// * `final_lib` - Path where the patched library will be written
 ///
 /// # Panics
 ///
 /// Panics if required platform tools are not available or if any command fails.
 ///
-/// # Example
+/// # Examples
 ///
-/// ```rust
-/// // In build.rs
-/// use std::env;
+/// ## Allowlist mode (library you control)
+///
+/// ```rust,no_run
+/// use staticlib_hygiene::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
 /// patch_lib(
 ///     Path::new("target/release/libmylib.a"),
-///     Path::new(&env::var("OUT_DIR").unwrap()),
+///     Path::new("out"),
 ///     "mylib",
-///     "mylib_",  // ← ALL your public functions must start with this!
-///     Path::new("target/release/libmylib_patched.a"),
+///     FilterMode::Allowlist { prefix: "mylib_".to_string() },
+///     Path::new("libmylib_patched.a"),
+/// );
+/// ```
+///
+/// ## Blocklist mode (third-party library)
+///
+/// ```rust,no_run
+/// use staticlib_hygiene::{patch_lib, FilterMode};
+/// use std::path::Path;
+///
+/// patch_lib(
+///     Path::new("vendor/libthirdparty.a"),
+///     Path::new("out"),
+///     "thirdparty",
+///     FilterMode::default_blocklist(),
+///     Path::new("libthirdparty_patched.a"),
 /// );
 /// ```
 pub fn patch_lib(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    symbol_prefix: &str, // e.g., "aic_" or "rb_"
+    mode: FilterMode,
     final_lib: &Path,
 ) {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
@@ -59,9 +115,9 @@ pub fn patch_lib(
     });
 
     match target_os.as_str() {
-        "windows" => patch_windows(static_lib, out_dir, lib_name, symbol_prefix, final_lib),
-        "macos" | "ios" => patch_macos(static_lib, out_dir, lib_name, symbol_prefix, final_lib),
-        _ => patch_linux(static_lib, out_dir, lib_name, symbol_prefix, final_lib),
+        "windows" => patch_windows(static_lib, out_dir, lib_name, &mode, final_lib),
+        "macos" | "ios" => patch_macos(static_lib, out_dir, lib_name, &mode, final_lib),
+        _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib),
     }
 }
 
@@ -70,7 +126,7 @@ fn patch_windows(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    symbol_prefix: &str,
+    mode: &FilterMode,
     final_lib: &Path,
 ) {
     use std::io::Read;
@@ -87,7 +143,7 @@ fn patch_windows(
         let mut data = Vec::new();
         entry.read_to_end(&mut data).expect("Failed to read entry");
 
-        let patched = match patch_coff_object(&data, symbol_prefix) {
+        let patched = match patch_coff_object(&data, mode) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -111,7 +167,7 @@ fn patch_windows(
 
 fn patch_coff_object(
     data: &[u8],
-    symbol_prefix: &str,
+    mode: &FilterMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use std::collections::HashMap;
 
@@ -136,7 +192,7 @@ fn patch_coff_object(
         section_map.insert(section.index().0, id);
     }
 
-    // Copy symbols
+    // Copy symbols - filter based on mode
     for symbol in file.symbols() {
         if symbol.kind() == SymbolKind::Section {
             continue;
@@ -144,8 +200,11 @@ fn patch_coff_object(
 
         let name = symbol.name().unwrap_or("").to_string();
 
-        // Keep only symbols with our prefix or turn others into local symbols
-        let keep = name.starts_with(symbol_prefix);
+        // Determine if this symbol should be kept as global
+        let keep_global = match mode {
+            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
+            FilterMode::Blocklist { remove } => !remove.contains(&name),
+        };
 
         let section = match symbol.section() {
             object::SymbolSection::Section(idx) => section_map
@@ -161,7 +220,7 @@ fn patch_coff_object(
             value: symbol.address(),
             size: symbol.size(),
             kind: symbol.kind(),
-            scope: if keep {
+            scope: if keep_global {
                 symbol.scope()
             } else {
                 object::SymbolScope::Compilation
@@ -211,10 +270,16 @@ fn patch_macos(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    symbol_prefix: &str,
+    mode: &FilterMode,
     final_lib: &Path,
 ) {
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64".to_string()
+        } else {
+            "x86_64".to_string()
+        }
+    });
     let arch = match target_arch.as_str() {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",
@@ -234,29 +299,59 @@ fn patch_macos(
         .expect("Failed to run ld");
     assert!(status.success(), "ld -r failed");
 
-    // Get symbols to keep
+    // Get all defined global symbols
     let nm_out = Command::new("nm")
         .args(&["-g", "-defined-only"])
         .arg(&intermediate)
         .output()
         .expect("Failed to run nm");
 
-    let symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
+    let all_symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 && parts[1].chars().any(|c| c.is_uppercase()) {
-                let sym = parts[2];
-                if sym.starts_with(symbol_prefix) || sym.starts_with(&format!("_{}", symbol_prefix))
-                {
-                    return Some(sym.to_string());
-                }
+                Some(parts[2].to_string())
+            } else {
+                None
             }
-            None
         })
         .collect();
 
-    fs::write(&symbols_file, symbols.join("\n")).expect("Failed to write symbols file");
+    // Filter symbols based on mode
+    let symbols_to_keep: Vec<String> = match mode {
+        FilterMode::Allowlist { prefix } => all_symbols
+            .into_iter()
+            .filter(|sym| {
+                // macOS prefixes symbols with underscore
+                sym.starts_with(prefix) || sym.starts_with(&format!("_{}", prefix))
+            })
+            .collect(),
+        FilterMode::Blocklist { remove } => all_symbols
+            .into_iter()
+            .filter(|sym| {
+                // Remove both with and without underscore prefix
+                let without_underscore = sym.strip_prefix('_').unwrap_or(sym);
+                !remove.contains(sym) && !remove.iter().any(|r| r == without_underscore)
+            })
+            .collect(),
+    };
+
+    if symbols_to_keep.is_empty() {
+        match mode {
+            FilterMode::Allowlist { prefix } => {
+                panic!(
+                    "No symbols found matching prefix '{}'. Did you forget to prefix your public functions?",
+                    prefix
+                );
+            }
+            FilterMode::Blocklist { .. } => {
+                eprintln!("Warning: All symbols were removed. This may not be intended.");
+            }
+        }
+    }
+
+    fs::write(&symbols_file, symbols_to_keep.join("\n")).expect("Failed to write symbols file");
 
     let final_obj = out_dir.join(format!("{}_final.o", lib_name));
 
@@ -290,7 +385,7 @@ fn patch_linux(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    symbol_prefix: &str,
+    mode: &FilterMode,
     final_lib: &Path,
 ) {
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
@@ -306,17 +401,32 @@ fn patch_linux(
         .expect("Failed to run ld");
     assert!(status.success(), "ld -r failed");
 
-    // Filter symbols
-    let wildcard = format!("{}*", symbol_prefix);
-    let status = Command::new("objcopy")
-        .arg("--wildcard")
-        .arg("--keep-global-symbol")
-        .arg(&wildcard)
-        .arg(&intermediate)
-        .arg(&final_obj)
-        .status()
-        .expect("Failed to run objcopy");
-    assert!(status.success(), "objcopy failed");
+    // Filter symbols based on mode
+    match mode {
+        FilterMode::Allowlist { prefix } => {
+            // Use objcopy with wildcard to keep only prefixed symbols
+            let wildcard = format!("{}*", prefix);
+            let status = Command::new("objcopy")
+                .arg("--wildcard")
+                .arg("--keep-global-symbol")
+                .arg(&wildcard)
+                .arg(&intermediate)
+                .arg(&final_obj)
+                .status()
+                .expect("Failed to run objcopy");
+            assert!(status.success(), "objcopy failed");
+        }
+        FilterMode::Blocklist { remove } => {
+            // Use objcopy to localize specific symbols
+            let mut cmd = Command::new("objcopy");
+            for symbol in remove {
+                cmd.arg("--localize-symbol").arg(symbol);
+            }
+            cmd.arg(&intermediate).arg(&final_obj);
+            let status = cmd.status().expect("Failed to run objcopy");
+            assert!(status.success(), "objcopy failed");
+        }
+    }
 
     // Create archive (try ar, fallback to llvm-ar)
     let ar_result = Command::new("ar")

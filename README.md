@@ -12,19 +12,24 @@ This library was inspired by:
 - [Alan Wu's blog post on symbol hygiene](https://blog.alirezahayati.com/2024/06/15/symbol-hygiene-for-rust-static-libraries/)
 - The ongoing [Rust issue #104707](https://github.com/rust-lang/rust/issues/104707) discussing symbol visibility in static libraries
 
-## Requirements
-
-**CRITICAL**: All functions you want to remain publicly accessible MUST start with your chosen prefix (e.g., `mylib_`, `aic_`, `rb_`).
-
 ## What This Does
 
-- **Keeps**: Symbols matching your prefix (e.g., `mylib_init`, `mylib_process`)
-- **Hides**: Everything else (Rust stdlib symbols like `rust_eh_personality`, `__rust_alloc`, internal functions, etc.)
+This library provides two filtering modes:
+
+### Allowlist Mode (for libraries you control)
+- **Keeps**: ONLY symbols matching your prefix (e.g., `mylib_init`, `mylib_process`)
+- **Hides**: Everything else (Rust stdlib symbols, internal functions, etc.)
+- **Requirement**: ALL public functions MUST start with your chosen prefix
+
+### Blocklist Mode (for third-party libraries)
+- **Keeps**: All symbols EXCEPT those in the blocklist
+- **Hides**: ONLY specific symbols (e.g., `rust_eh_personality`, `__rust_alloc`)
+- **Use case**: When you can't rename functions but need to hide conflicting symbols
 
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install --git
 ```
 
 Or use directly from the repository:
@@ -38,47 +43,62 @@ cargo build --release
 
 ### As a CLI Tool (Post-Build)
 
-The easiest way to use staticlib-hygiene is as a command-line tool in your build process:
+The CLI provides two subcommands for the two filtering modes.
+
+#### Allowlist Mode (keep only prefixed symbols)
 
 ```bash
-# After building your static library
-cargo build --release
-
-# Patch it with the CLI tool
-staticlib-hygiene \
+staticlib-hygiene allowlist \
   --input target/release/libmylib.a \
   --output target/release/libmylib_patched.a \
-  --prefix mylib_ \
-  --name mylib
+  --prefix mylib_
 ```
 
-**CLI Options:**
-- `--input, -i`: Path to input static library
-- `--output, -o`: Path to output patched library
-- `--prefix, -p`: Symbol prefix to keep (e.g., "mylib_")
+**Options:**
+- `--input, -i`: Path to input static library (required)
+- `--output, -o`: Path to output patched library (required)
+- `--prefix, -p`: Symbol prefix to keep (required)
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
-- `--temp-dir, -t`: Directory for temporary files (optional, uses system temp)
+- `--temp-dir, -t`: Directory for temporary files (optional)
+
+#### Blocklist Mode (hide specific symbols)
+
+```bash
+# Use default blocklist (hides common Rust stdlib symbols)
+staticlib-hygiene blocklist \
+  --input vendor/libthirdparty.a \
+  --output vendor/libthirdparty_patched.a
+
+# Or use custom blocklist
+staticlib-hygiene blocklist \
+  --input vendor/lib2.a \
+  --output vendor/lib2_patched.a \
+  --symbols "rust_eh_personality,my_conflict,__rust_alloc"
+```
+
+**Options:**
+- `--input, -i`: Path to input static library (required)
+- `--output, -o`: Path to output patched library (required)
+- `--symbols, -s`: Comma-separated list of symbols to hide (optional, defaults to stdlib symbols)
+- `--name, -n`: Base name for temporary files (optional, default: "lib")
+- `--temp-dir, -t`: Directory for temporary files (optional)
+
+**Default blocklist includes:**
+- `rust_eh_personality`, `__rust_alloc`, `__rust_dealloc`, `__rust_realloc`
+- `__rust_alloc_zeroed`, `__rust_alloc_error_handler`, `__rust_no_alloc_shim_is_unstable`
 
 For detailed CLI usage including CI/CD integration examples, see [CLI_USAGE.md](CLI_USAGE.md).
 
 ### As a Rust Library (build.rs)
 
-You can also use it programmatically in your `build.rs`:
+You can also use it programmatically in your `build.rs`. There are two filtering modes:
 
-1. **Prefix ALL public functions:**
+#### Mode 1: Allowlist (for libraries you control)
 
-```rust
-#[unsafe(no_mangle)]
-pub extern "C" fn mylib_init() { }  // ✓ Will be kept
-
-#[unsafe(no_mangle)]
-pub extern "C" fn init() { }        // ✗ Will be hidden!
-```
-
-2. **Call from build.rs:**
+Keeps ONLY symbols with your prefix. All other symbols are hidden.
 
 ```rust
-use staticlib_hygiene::patch_lib;
+use staticlib_hygiene::{patch_lib, FilterMode};
 use std::env;
 use std::path::Path;
 
@@ -89,13 +109,55 @@ fn main() {
         Path::new("target/release/libmylib.a"),
         Path::new(&out_dir),
         "mylib",
-        "mylib_",  // Your prefix - ALL public functions must start with this!
+        FilterMode::Allowlist {
+            prefix: "mylib_".to_string(),
+        },
         Path::new("target/release/libmylib_patched.a"),
     );
 
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=static=mylib_patched");
 }
+```
+
+**Important**: ALL public functions must start with your prefix:
+```rust
+#[unsafe(no_mangle)]
+pub extern "C" fn mylib_init() { }  // ✓ Will be kept
+
+#[unsafe(no_mangle)]
+pub extern "C" fn init() { }        // ✗ Will be hidden!
+```
+
+#### Mode 2: Blocklist (for third-party libraries)
+
+Hides ONLY specific symbols. Everything else remains visible.
+
+```rust
+use staticlib_hygiene::{patch_lib, FilterMode};
+
+// Use default blocklist (hides common Rust stdlib symbols)
+patch_lib(
+    Path::new("vendor/libthirdparty.a"),
+    Path::new(&out_dir),
+    "thirdparty",
+    FilterMode::default_blocklist(),
+    Path::new("libthirdparty_patched.a"),
+);
+
+// Or use a custom blocklist
+patch_lib(
+    Path::new("vendor/lib2.a"),
+    Path::new(&out_dir),
+    "lib2",
+    FilterMode::Blocklist {
+        remove: vec![
+            "rust_eh_personality".to_string(),
+            "my_conflict".to_string(),
+        ],
+    },
+    Path::new("lib2_patched.a"),
+);
 ```
 
 ## Platform-Specific Tools Required
@@ -106,17 +168,23 @@ fn main() {
 
 ## Common Issues
 
-### "Undefined symbol" errors after patching
+### "Undefined symbol" errors after patching (Allowlist mode)
 
-→ You forgot to prefix a public function. Add your prefix to ALL exported functions.
+→ You forgot to prefix a public function. Add your prefix to ALL exported functions, or switch to Blocklist mode if you can't control the function names.
 
-### Multiple definition errors still occur
+### Multiple definition errors still occur (Blocklist mode)
 
-→ Two libraries are exporting the same prefixed symbol. Use different prefixes for different libraries.
+→ Add the conflicting symbol to your blocklist. Use `nm` to identify which symbols are conflicting.
+
+### All symbols were removed
+
+→ In Allowlist mode: Check that your functions actually start with the prefix you specified.
+→ In Blocklist mode: You may have accidentally hidden all symbols. Review your blocklist.
 
 ### Works without patch, breaks with it
 
-→ You're probably calling an unprefixed function from C. Check that ALL FFI functions have your prefix.
+→ In Allowlist mode: You're probably calling an unprefixed function from C. Check that ALL FFI functions have your prefix.
+→ In Blocklist mode: A symbol you're using was added to the blocklist by mistake.
 
 ## Example
 

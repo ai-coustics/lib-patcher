@@ -1,4 +1,4 @@
-use staticlib_hygiene::patch_lib;
+use staticlib_hygiene::{FilterMode, patch_lib};
 use std::env;
 use std::path::PathBuf;
 
@@ -32,7 +32,15 @@ fn main() {
     );
 
     // Patch the library to only expose symbols with the "mylib_" prefix
-    patch_lib(&mylib_path, &out_dir, "mylib", "mylib_", &patched_lib);
+    patch_lib(
+        &mylib_path,
+        &out_dir,
+        "mylib",
+        FilterMode::Allowlist {
+            prefix: "mylib_".to_string(),
+        },
+        &patched_lib,
+    );
 
     println!("cargo:warning=Patching complete!");
 
