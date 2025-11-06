@@ -289,6 +289,17 @@ fn patch_macos(
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let symbols_file = out_dir.join("symbols.txt");
 
+    // Debug: Check what's in the original static library
+    let ar_list = Command::new("ar")
+        .arg("-t")
+        .arg(static_lib)
+        .output()
+        .expect("Failed to run ar -t");
+    eprintln!(
+        "DEBUG: ar -t output:\n{}",
+        String::from_utf8_lossy(&ar_list.stdout)
+    );
+
     // Partial link with platform version (required on newer macOS)
     let output = Command::new("ld")
         .arg("-arch")

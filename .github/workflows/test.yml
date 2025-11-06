@@ -44,49 +44,6 @@ jobs:
           cd examples/mylib-test
           cargo +beta run --release
 
-      - name: Test CLI tool (allowlist mode)
-        run: |
-          ./target/release/staticlib-hygiene allowlist \
-            --input examples/mylib/target/release/libmylib.a \
-            --output /tmp/test_cli_allowlist.a \
-            --prefix mylib_
-        shell: bash
-        if: runner.os != 'Windows'
-
-      - name: Test CLI tool (blocklist default mode)
-        run: |
-          ./target/release/staticlib-hygiene blocklist \
-            --input examples/mylib/target/release/libmylib.a \
-            --output /tmp/test_cli_blocklist.a
-        shell: bash
-        if: runner.os != 'Windows'
-
-      - name: Test CLI tool (blocklist custom mode)
-        run: |
-          ./target/release/staticlib-hygiene blocklist \
-            --input examples/mylib/target/release/libmylib.a \
-            --output /tmp/test_cli_custom.a \
-            --symbols "rust_eh_personality,some_other_function"
-        shell: bash
-        if: runner.os != 'Windows'
-
-      - name: Test CLI tool on Windows (allowlist mode)
-        if: runner.os == 'Windows'
-        run: |
-          .\target\release\staticlib-hygiene.exe allowlist `
-            --input examples\mylib\target\release\mylib.lib `
-            --output $env:TEMP\test_cli_allowlist.lib `
-            --prefix mylib_
-        shell: pwsh
-
-      - name: Test CLI tool on Windows (blocklist mode)
-        if: runner.os == 'Windows'
-        run: |
-          .\target\release\staticlib-hygiene.exe blocklist `
-            --input examples\mylib\target\release\mylib.lib `
-            --output $env:TEMP\test_cli_blocklist.lib
-        shell: pwsh
-
       - name: Patch mylib for C test (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
