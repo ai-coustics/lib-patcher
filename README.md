@@ -173,25 +173,6 @@ patch_lib(
 → In Allowlist mode: You're probably calling an unprefixed function from C. Check that ALL FFI functions have your prefix.
 → In Blocklist mode: A symbol you're using was added to the blocklist by mistake.
 
-## Example
-
-```rust
-// mylib.rs - GOOD ✓
-#[unsafe(no_mangle)]
-pub extern "C" fn mylib_create() -> *mut MyLib { /* ... */ }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn mylib_destroy(ptr: *mut MyLib) { /* ... */ }
-
-// These will be hidden automatically (no prefix needed):
-fn internal_helper() { /* ... */ }  // Private, will be hidden
-
-// mylib.rs - BAD ✗
-#[unsafe(no_mangle)]
-pub extern "C" fn create() -> *mut MyLib { /* ... */ }  // No prefix!
-// This will be hidden and cause "undefined symbol: create" errors!
-```
-
 ## Example Projects
 
 This repository includes three example projects in the `examples/` directory.
