@@ -1,4 +1,4 @@
-use staticlib_hygiene::{FilterMode, patch_lib};
+use libcut::{FilterMode, patch_lib};
 use std::env;
 use std::path::PathBuf;
 

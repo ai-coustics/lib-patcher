@@ -85,7 +85,7 @@ You can also use it programmatically in your `build.rs`. There are two filtering
 Keeps ONLY symbols with your prefix. All other symbols are hidden.
 
 ```rust
-use staticlib_hygiene::{patch_lib, FilterMode};
+use libcut::{patch_lib, FilterMode};
 use std::env;
 use std::path::Path;
 
@@ -121,7 +121,7 @@ pub extern "C" fn init() { }        // ✗ Will be hidden!
 Hides ONLY specific symbols. Everything else remains visible.
 
 ```rust
-use staticlib_hygiene::{patch_lib, FilterMode};
+use libcut::{patch_lib, FilterMode};
 
 // Use default blocklist (hides common Rust stdlib symbols)
 patch_lib(

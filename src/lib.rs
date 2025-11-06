@@ -69,7 +69,7 @@ impl FilterMode {
 /// ## Allowlist mode (library you control)
 ///
 /// ```rust,no_run
-/// use staticlib_hygiene::{patch_lib, FilterMode};
+/// use libcut::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
 /// patch_lib(
@@ -84,7 +84,7 @@ impl FilterMode {
 /// ## Blocklist mode (third-party library)
 ///
 /// ```rust,no_run
-/// use staticlib_hygiene::{patch_lib, FilterMode};
+/// use libcut::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
 /// patch_lib(
