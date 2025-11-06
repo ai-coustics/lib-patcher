@@ -21,7 +21,49 @@ This library was inspired by:
 - **Keeps**: Symbols matching your prefix (e.g., `mylib_init`, `mylib_process`)
 - **Hides**: Everything else (Rust stdlib symbols like `rust_eh_personality`, `__rust_alloc`, internal functions, etc.)
 
+## Installation
+
+```bash
+cargo install --path .
+```
+
+Or use directly from the repository:
+
+```bash
+cargo build --release
+# Binary will be at: target/release/staticlib-hygiene
+```
+
 ## How to Use
+
+### As a CLI Tool (Post-Build)
+
+The easiest way to use staticlib-hygiene is as a command-line tool in your build process:
+
+```bash
+# After building your static library
+cargo build --release
+
+# Patch it with the CLI tool
+staticlib-hygiene \
+  --input target/release/libmylib.a \
+  --output target/release/libmylib_patched.a \
+  --prefix mylib_ \
+  --name mylib
+```
+
+**CLI Options:**
+- `--input, -i`: Path to input static library
+- `--output, -o`: Path to output patched library
+- `--prefix, -p`: Symbol prefix to keep (e.g., "mylib_")
+- `--name, -n`: Base name for temporary files (optional, default: "lib")
+- `--temp-dir, -t`: Directory for temporary files (optional, uses system temp)
+
+For detailed CLI usage including CI/CD integration examples, see [CLI_USAGE.md](CLI_USAGE.md).
+
+### As a Rust Library (build.rs)
+
+You can also use it programmatically in your `build.rs`:
 
 1. **Prefix ALL public functions:**
 

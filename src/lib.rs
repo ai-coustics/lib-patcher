@@ -45,7 +45,18 @@ pub fn patch_lib(
     symbol_prefix: &str, // e.g., "aic_" or "rb_"
     final_lib: &Path,
 ) {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
+        // Fall back to detecting the current OS if not in a cargo build context
+        if cfg!(target_os = "windows") {
+            "windows".to_string()
+        } else if cfg!(target_os = "macos") {
+            "macos".to_string()
+        } else if cfg!(target_os = "ios") {
+            "ios".to_string()
+        } else {
+            "linux".to_string()
+        }
+    });
 
     match target_os.as_str() {
         "windows" => patch_windows(static_lib, out_dir, lib_name, symbol_prefix, final_lib),
