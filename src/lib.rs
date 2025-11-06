@@ -290,7 +290,7 @@ fn patch_macos(
     let symbols_file = out_dir.join("symbols.txt");
 
     // Partial link with platform version (required on newer macOS)
-    let status = Command::new("ld")
+    let output = Command::new("ld")
         .arg("-arch")
         .arg(arch)
         .arg("-r")
@@ -302,9 +302,17 @@ fn patch_macos(
         .arg(&intermediate)
         .arg("-all_load")
         .arg(static_lib)
-        .status()
+        .output()
         .expect("Failed to run ld");
-    assert!(status.success(), "ld -r failed");
+
+    eprintln!("DEBUG: ld exit status: {}", output.status);
+    eprintln!(
+        "DEBUG: ld stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprintln!("DEBUG: intermediate file exists: {}", intermediate.exists());
+
+    assert!(output.status.success(), "ld -r failed");
 
     // Get all defined global symbols
     // Note: macOS nm uses -U to exclude undefined symbols, not --defined-only
@@ -313,6 +321,13 @@ fn patch_macos(
         .arg(&intermediate)
         .output()
         .expect("Failed to run nm");
+
+    eprintln!("DEBUG: nm exit status: {}", nm_out.status);
+    eprintln!(
+        "DEBUG: nm stderr: {}",
+        String::from_utf8_lossy(&nm_out.stderr)
+    );
+    eprintln!("DEBUG: nm stdout length: {}", nm_out.stdout.len());
 
     let all_symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
         .lines()
