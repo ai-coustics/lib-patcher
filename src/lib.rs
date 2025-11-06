@@ -176,26 +176,61 @@ fn patch_coff_object(
 
     let mut section_map = HashMap::new();
     let mut symbol_map = HashMap::new();
+    let mut section_sym_map = HashMap::new();
 
-    // Copy sections
+    // Copy sections and create section symbols
     for section in file.sections() {
-        let name = section.name_bytes()?.to_vec();
+        let name_bytes = match section.name_bytes() {
+            Ok(n) if !n.is_empty() => n,
+            _ => continue,
+        };
+        let name = name_bytes.to_vec();
         let kind = section.kind();
-        let id = writer.add_section(Vec::new(), name, kind);
+        let id = writer.add_section(Vec::new(), name.clone(), kind);
 
-        if let Ok(data) = section.uncompressed_data() {
-            writer
-                .section_mut(id)
-                .set_data(data.into_owned(), section.align());
+        let align = section.align();
+        if kind != SectionKind::UninitializedData {
+            if let Ok(data) = section.uncompressed_data() {
+                let data_bytes = data.into_owned();
+                if !data_bytes.is_empty() {
+                    writer.section_mut(id).set_data(data_bytes, align);
+                }
+            }
         }
 
+        // Create section symbol
+        let sec_sym = Symbol {
+            name: name.clone(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Section,
+            scope: object::SymbolScope::Compilation,
+            weak: false,
+            section: SymbolSection::Section(id),
+            flags: SymbolFlags::None,
+        };
+        let sec_sym_id = writer.add_symbol(sec_sym);
+
         section_map.insert(section.index().0, id);
+        section_sym_map.insert(section.index().0, sec_sym_id);
     }
 
     // Copy symbols - filter based on mode
     for symbol in file.symbols() {
+        let orig_idx = symbol.index().0;
+
+        // Map section symbols to our created section symbols
         if symbol.kind() == SymbolKind::Section {
-            continue;
+            if let object::SymbolSection::Section(sec_idx) = symbol.section() {
+                if let Some(&sec_sym_id) = section_sym_map.get(&sec_idx.0) {
+                    symbol_map.insert(orig_idx, sec_sym_id);
+                    continue;
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
         }
 
         let name = symbol.name().unwrap_or("").to_string();
@@ -221,6 +256,11 @@ fn patch_coff_object(
             _ => SymbolSection::Undefined,
         };
 
+        // Skip empty-named symbols in sections (except special symbols)
+        if name.is_empty() && matches!(section, SymbolSection::Section(_)) && !is_special_symbol {
+            continue;
+        }
+
         let wsym = Symbol {
             name: name.into_bytes(),
             value: symbol.address(),
@@ -237,7 +277,7 @@ fn patch_coff_object(
         };
 
         let id = writer.add_symbol(wsym);
-        symbol_map.insert(symbol.index().0, id);
+        symbol_map.insert(orig_idx, id);
     }
 
     // Copy relocations
@@ -247,23 +287,29 @@ fn patch_coff_object(
         };
 
         for (offset, reloc) in section.relocations() {
-            if let RelocationTarget::Symbol(idx) = reloc.target()
-                && let Some(&sym) = symbol_map.get(&idx.0)
-            {
-                let flags = object::write::RelocationFlags::Generic {
-                    kind: reloc.kind(),
-                    encoding: reloc.encoding(),
-                    size: reloc.size(),
-                };
-                writer.add_relocation(
-                    new_sec,
-                    Relocation {
-                        offset,
-                        symbol: sym,
-                        addend: reloc.addend(),
-                        flags,
-                    },
-                )?;
+            if let RelocationTarget::Symbol(idx) = reloc.target() {
+                // Try symbol_map first, then section_sym_map
+                let target_sym = symbol_map
+                    .get(&idx.0)
+                    .or_else(|| section_sym_map.get(&idx.0))
+                    .copied();
+
+                if let Some(sym) = target_sym {
+                    let flags = object::write::RelocationFlags::Generic {
+                        kind: reloc.kind(),
+                        encoding: reloc.encoding(),
+                        size: reloc.size(),
+                    };
+                    writer.add_relocation(
+                        new_sec,
+                        Relocation {
+                            offset,
+                            symbol: sym,
+                            addend: reloc.addend(),
+                            flags,
+                        },
+                    )?;
+                }
             }
         }
     }
