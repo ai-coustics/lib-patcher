@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::File;
@@ -8,6 +8,43 @@ use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
 use object::{
     Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SymbolFlags, SymbolKind,
 };
+
+/// Find an LLVM tool (like llvm-nm) in rustc's sysroot
+fn find_llvm_tool(tool_name: &str) -> Option<String> {
+    // Try to get rustc's sysroot
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut tool_path = PathBuf::from(sysroot);
+    tool_path.push("lib");
+    tool_path.push("rustlib");
+
+    // Get the host triple
+    let host_output = Command::new("rustc").args(["-vV"]).output().ok()?;
+
+    let host_triple = String::from_utf8_lossy(&host_output.stdout)
+        .lines()
+        .find(|line| line.starts_with("host: "))?
+        .strip_prefix("host: ")?
+        .to_string();
+
+    tool_path.push(host_triple);
+    tool_path.push("bin");
+    tool_path.push(tool_name);
+
+    if tool_path.exists() {
+        Some(tool_path.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
 
 /// Filtering strategy for symbol visibility
 #[derive(Debug, Clone)]
@@ -326,13 +363,17 @@ fn patch_macos(
     assert!(output.status.success(), "ld -r failed");
 
     // Get all defined global symbols
-    // Note: macOS nm uses -U to exclude undefined symbols, not --defined-only
-    let nm_out = Command::new("nm")
-        .args(["-g", "-U"])
+    // Use llvm-nm instead of system nm to avoid LLVM version mismatch issues
+    // Try to find llvm-nm from rustc's sysroot first, then fall back to system nm
+    let nm_cmd = find_llvm_tool("llvm-nm").unwrap_or_else(|| "nm".to_string());
+
+    let nm_out = Command::new(&nm_cmd)
+        .args(["--defined-only", "--extern-only"])
         .arg(&intermediate)
         .output()
         .expect("Failed to run nm");
 
+    eprintln!("DEBUG: Using nm command: {}", nm_cmd);
     eprintln!("DEBUG: nm exit status: {}", nm_out.status);
     eprintln!(
         "DEBUG: nm stderr: {}",
