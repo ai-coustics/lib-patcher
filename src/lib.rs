@@ -242,22 +242,23 @@ fn patch_coff_object(
 
         for (offset, reloc) in section.relocations() {
             if let RelocationTarget::Symbol(idx) = reloc.target()
-                && let Some(&sym) = symbol_map.get(&idx.0) {
-                    let flags = object::write::RelocationFlags::Generic {
-                        kind: reloc.kind(),
-                        encoding: reloc.encoding(),
-                        size: reloc.size(),
-                    };
-                    writer.add_relocation(
-                        new_sec,
-                        Relocation {
-                            offset,
-                            symbol: sym,
-                            addend: reloc.addend(),
-                            flags,
-                        },
-                    )?;
-                }
+                && let Some(&sym) = symbol_map.get(&idx.0)
+            {
+                let flags = object::write::RelocationFlags::Generic {
+                    kind: reloc.kind(),
+                    encoding: reloc.encoding(),
+                    size: reloc.size(),
+                };
+                writer.add_relocation(
+                    new_sec,
+                    Relocation {
+                        offset,
+                        symbol: sym,
+                        addend: reloc.addend(),
+                        flags,
+                    },
+                )?;
+            }
         }
     }
 
