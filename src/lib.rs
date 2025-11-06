@@ -318,16 +318,32 @@ fn patch_macos(
         })
         .collect();
 
+    // Debug: print all symbols found
+    eprintln!("DEBUG: Found {} symbols total", all_symbols.len());
+    if all_symbols.len() <= 20 {
+        for sym in &all_symbols {
+            eprintln!("DEBUG: Symbol: {}", sym);
+        }
+    }
+
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
-        FilterMode::Allowlist { prefix } => all_symbols
-            .into_iter()
-            .filter(|sym| {
-                // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
-                let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
-                sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
-            })
-            .collect(),
+        FilterMode::Allowlist { prefix } => {
+            eprintln!("DEBUG: Filtering with prefix '{}'", prefix);
+            all_symbols
+                .into_iter()
+                .filter(|sym| {
+                    // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
+                    let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
+                    let matches =
+                        sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix);
+                    if matches {
+                        eprintln!("DEBUG: Keeping symbol: {}", sym);
+                    }
+                    matches
+                })
+                .collect()
+        }
         FilterMode::Blocklist { remove } => all_symbols
             .into_iter()
             .filter(|sym| {
