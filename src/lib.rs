@@ -323,8 +323,9 @@ fn patch_macos(
         FilterMode::Allowlist { prefix } => all_symbols
             .into_iter()
             .filter(|sym| {
-                // macOS prefixes symbols with underscore
-                sym.starts_with(prefix) || sym.starts_with(&format!("_{}", prefix))
+                // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
+                let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
+                sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
             })
             .collect(),
         FilterMode::Blocklist { remove } => all_symbols
