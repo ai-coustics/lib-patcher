@@ -6,7 +6,8 @@ use std::process::Command;
 use object::read::File;
 use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
 use object::{
-    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SymbolFlags, SymbolKind,
+    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolFlags,
+    SymbolKind,
 };
 
 /// Filtering strategy for symbol visibility
