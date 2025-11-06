@@ -157,3 +157,49 @@ jobs:
             --input examples\mylib\target\release\mylib.lib `
             --output $env:TEMP\test_cli_blocklist.lib
         shell: pwsh
+
+      - name: Patch mylib for C test (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          ./target/release/staticlib-hygiene allowlist \
+            --input examples/mylib/target/release/libmylib.a \
+            --output examples/mylib/target/release/libmylib_patched.a \
+            --prefix mylib_
+        shell: bash
+
+      - name: Patch mylib for C test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\release\staticlib-hygiene.exe allowlist `
+            --input examples\mylib\target\release\mylib.lib `
+            --output examples\mylib\target\release\mylib_patched.lib `
+            --prefix mylib_
+        shell: pwsh
+
+      - name: Build C test (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd examples/mylib-test-c
+          make
+        shell: bash
+
+      - name: Build C test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd examples\mylib-test-c
+          cl /Fe:mylib-test-c.exe main.c ..\mylib\target\release\mylib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib
+        shell: cmd
+
+      - name: Run C test (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd examples/mylib-test-c
+          ./mylib-test-c
+        shell: bash
+
+      - name: Run C test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd examples\mylib-test-c
+          .\mylib-test-c.exe
+        shell: cmd

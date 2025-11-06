@@ -207,6 +207,8 @@ cd ../mylib-test-unpatched && cargo build --release
 
 # Try patched version (Rust beta) - SUCCEEDS
 cd ../mylib-test && cargo run --release
+
+cd ../mylib-test-c && ./patch.sh && make run
 ```
 
 **Result**: The patched version successfully links a library built with one Rust version into a binary built with another Rust version, while the unpatched version fails with duplicate symbol errors.
