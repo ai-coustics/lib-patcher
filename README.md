@@ -8,7 +8,7 @@ This library hides internal Rust standard library symbols from static libraries 
 
 This library was inspired by:
 
-- [staticlib-fucker](https://github.com/moelife-coder/staticlib-fucker) - A tool addressing Windows only
+- [staticlib-fucker](https://github.com/zeozeozeo/staticlib-fucker) - A Windows-only tool for addressing this problem
 - [Alan Wu's blog post on symbol hygiene](https://blog.alirezahayati.com/2024/06/15/symbol-hygiene-for-rust-static-libraries/)
 - The ongoing [Rust issue #104707](https://github.com/rust-lang/rust/issues/104707) discussing symbol visibility in static libraries
 
