@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use object::read::File;
@@ -8,67 +8,6 @@ use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
 use object::{
     Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SymbolFlags, SymbolKind,
 };
-
-/// Find an LLVM tool (like llvm-nm) in rustc's sysroot
-fn find_llvm_tool(tool_name: &str) -> Option<String> {
-    // Try to get rustc's sysroot
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    eprintln!("DEBUG: rustc sysroot: {}", sysroot);
-
-    // Try multiple possible locations for llvm-nm
-    // Location 1: bin/ (toolchains installed via rustup)
-    let mut tool_path = PathBuf::from(&sysroot);
-    tool_path.push("bin");
-    tool_path.push(tool_name);
-
-    eprintln!(
-        "DEBUG: Checking for {} at: {}",
-        tool_name,
-        tool_path.display()
-    );
-    if tool_path.exists() {
-        eprintln!("DEBUG: Found {} at: {}", tool_name, tool_path.display());
-        return Some(tool_path.to_string_lossy().to_string());
-    }
-
-    // Location 2: lib/rustlib/<triple>/bin/
-    let host_output = Command::new("rustc").args(["-vV"]).output().ok()?;
-
-    let host_triple = String::from_utf8_lossy(&host_output.stdout)
-        .lines()
-        .find(|line| line.starts_with("host: "))?
-        .strip_prefix("host: ")?
-        .to_string();
-
-    let mut tool_path = PathBuf::from(&sysroot);
-    tool_path.push("lib");
-    tool_path.push("rustlib");
-    tool_path.push(host_triple);
-    tool_path.push("bin");
-    tool_path.push(tool_name);
-
-    eprintln!(
-        "DEBUG: Checking for {} at: {}",
-        tool_name,
-        tool_path.display()
-    );
-    if tool_path.exists() {
-        eprintln!("DEBUG: Found {} at: {}", tool_name, tool_path.display());
-        Some(tool_path.to_string_lossy().to_string())
-    } else {
-        eprintln!("DEBUG: {} not found in any location", tool_name);
-        None
-    }
-}
 
 /// Filtering strategy for symbol visibility
 #[derive(Debug, Clone)]
