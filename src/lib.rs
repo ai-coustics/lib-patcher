@@ -300,8 +300,9 @@ fn patch_macos(
     assert!(status.success(), "ld -r failed");
 
     // Get all defined global symbols
+    // Note: macOS nm uses -U to exclude undefined symbols, not --defined-only
     let nm_out = Command::new("nm")
-        .args(["-g", "-defined-only"])
+        .args(["-g", "-U"])
         .arg(&intermediate)
         .output()
         .expect("Failed to run nm");
