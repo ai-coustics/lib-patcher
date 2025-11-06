@@ -1,4 +1,4 @@
-# staticlib-hygiene
+# libcut
 
 Symbol filtering for cross-platform static libraries to prevent linking conflicts.
 
@@ -35,7 +35,7 @@ The CLI provides two subcommands for the two filtering modes.
 #### Allowlist Mode (keep only prefixed symbols)
 
 ```bash
-staticlib-hygiene allowlist \
+libcut allowlist \
   --input target/release/libmylib.a \
   --output target/release/libmylib_patched.a \
   --prefix mylib_
@@ -52,12 +52,12 @@ staticlib-hygiene allowlist \
 
 ```bash
 # Use default blocklist (hides common Rust stdlib symbols)
-staticlib-hygiene blocklist \
+libcut blocklist \
   --input vendor/libthirdparty.a \
   --output vendor/libthirdparty_patched.a
 
 # Or use custom blocklist
-staticlib-hygiene blocklist \
+libcut blocklist \
   --input vendor/lib2.a \
   --output vendor/lib2_patched.a \
   --symbols "rust_eh_personality,my_conflict,__rust_alloc"

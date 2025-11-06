@@ -59,7 +59,7 @@ jobs:
         run: |
           ls -la examples/mylib/target/release/
           pwd
-          ./target/release/staticlib-hygiene allowlist \
+          ./target/release/libcut allowlist \
             --input examples/mylib/target/release/libmylib.a \
             --output examples/mylib/target/release/libmylib_patched.a \
             --prefix mylib_
@@ -68,7 +68,7 @@ jobs:
       - name: Patch mylib for C test (Windows)
         if: runner.os == 'Windows'
         run: |
-          .\target\release\staticlib-hygiene.exe allowlist `
+          .\target\release\libcut.exe allowlist `
             --input examples\mylib\target\release\mylib.lib `
             --output examples\mylib\target\release\mylib_patched.lib `
             --prefix mylib_

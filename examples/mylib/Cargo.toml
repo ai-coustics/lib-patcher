@@ -8,4 +8,4 @@ publish = false
 crate-type = ["staticlib"]
 
 [build-dependencies]
-staticlib-hygiene = { path = "../.." }
+libcut = { path = "../.." }

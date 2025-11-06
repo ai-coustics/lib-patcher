@@ -6,7 +6,7 @@ cargo build --release
 
 echo "Patching mylib..."
 cd ../..
-./target/release/staticlib-hygiene allowlist \
+./target/release/libcut allowlist \
   --input examples/mylib/target/release/libmylib.a \
   --output examples/mylib/target/release/libmylib_patched.a \
   --prefix mylib_
