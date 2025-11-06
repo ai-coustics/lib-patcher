@@ -293,9 +293,13 @@ fn patch_macos(
     let extract_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&extract_dir).expect("Failed to create extract dir");
 
+    // Convert to absolute path before changing directory (needed for macOS ar)
+    let static_lib_abs = std::fs::canonicalize(static_lib)
+        .expect("Failed to resolve absolute path for static library");
+
     let extract_status = Command::new("ar")
         .arg("-x")
-        .arg(static_lib)
+        .arg(&static_lib_abs)
         .current_dir(&extract_dir)
         .status()
         .expect("Failed to extract archive");
