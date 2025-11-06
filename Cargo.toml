@@ -1,0 +1,15 @@
+[package]
+name = "staticlib-hygiene"
+version = "0.1.0"
+edition = "2024"
+authors = ["Stephan Eckes <stephan.eckes@ai-coustics.com>"]
+description = "Cross-platform symbol filtering for Rust static libraries to prevent linking conflicts"
+readme = "README.md"
+repository = "https://github.com/username/staticlib-hygiene"
+license = "MIT OR Apache-2.0"
+keywords = ["static-library", "linking", "symbol-filtering", "build-tools", "ffi"]
+categories = ["development-tools::build-utils", "development-tools::ffi"]
+
+[dependencies]
+object = { version = "0.37", features = ["write_core", "read_core", "std"] }
+ar = "0.9"
