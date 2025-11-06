@@ -44,6 +44,12 @@ jobs:
           cd examples/mylib-test
           cargo +beta run --release
 
+      - name: Rebuild mylib for C test
+        run: |
+          cd examples/mylib
+          cargo build --release
+        shell: bash
+
       - name: Patch mylib for C test (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
