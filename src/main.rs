@@ -193,12 +193,11 @@ fn get_temp_dir(temp_dir: Option<PathBuf>) -> PathBuf {
     });
 
     // Create temp dir if it doesn't exist
-    if !dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+    if !dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("Error: Failed to create temp directory: {}", e);
             std::process::exit(1);
         }
-    }
 
     dir
 }

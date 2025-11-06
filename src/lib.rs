@@ -241,8 +241,8 @@ fn patch_coff_object(
         };
 
         for (offset, reloc) in section.relocations() {
-            if let RelocationTarget::Symbol(idx) = reloc.target() {
-                if let Some(&sym) = symbol_map.get(&idx.0) {
+            if let RelocationTarget::Symbol(idx) = reloc.target()
+                && let Some(&sym) = symbol_map.get(&idx.0) {
                     let flags = object::write::RelocationFlags::Generic {
                         kind: reloc.kind(),
                         encoding: reloc.encoding(),
@@ -258,7 +258,6 @@ fn patch_coff_object(
                         },
                     )?;
                 }
-            }
         }
     }
 
@@ -291,7 +290,7 @@ fn patch_macos(
 
     // Partial link
     let status = Command::new("ld")
-        .args(&["-arch", arch, "-r", "-o"])
+        .args(["-arch", arch, "-r", "-o"])
         .arg(&intermediate)
         .arg("-all_load")
         .arg(static_lib)
@@ -301,7 +300,7 @@ fn patch_macos(
 
     // Get all defined global symbols
     let nm_out = Command::new("nm")
-        .args(&["-g", "-defined-only"])
+        .args(["-g", "-defined-only"])
         .arg(&intermediate)
         .output()
         .expect("Failed to run nm");
@@ -357,7 +356,7 @@ fn patch_macos(
 
     // Filter symbols
     let status = Command::new("ld")
-        .args(&["-arch", arch, "-r", "-o"])
+        .args(["-arch", arch, "-r", "-o"])
         .arg(&final_obj)
         .arg("-exported_symbols_list")
         .arg(&symbols_file)
@@ -368,7 +367,7 @@ fn patch_macos(
 
     // Create archive
     let status = Command::new("ar")
-        .args(&["rcs"])
+        .args(["rcs"])
         .arg(final_lib)
         .arg(&final_obj)
         .status()
@@ -393,7 +392,7 @@ fn patch_linux(
 
     // Partial link
     let status = Command::new("ld")
-        .args(&["-r", "-o"])
+        .args(["-r", "-o"])
         .arg(&intermediate)
         .arg("--whole-archive")
         .arg(static_lib)
@@ -430,14 +429,14 @@ fn patch_linux(
 
     // Create archive (try ar, fallback to llvm-ar)
     let ar_result = Command::new("ar")
-        .args(&["rcs"])
+        .args(["rcs"])
         .arg(final_lib)
         .arg(&final_obj)
         .status();
 
     if !ar_result.map(|s| s.success()).unwrap_or(false) {
         let status = Command::new("llvm-ar")
-            .args(&["rcs"])
+            .args(["rcs"])
             .arg(final_lib)
             .arg(&final_obj)
             .status()
