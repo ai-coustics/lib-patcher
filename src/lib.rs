@@ -289,9 +289,16 @@ fn patch_macos(
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let symbols_file = out_dir.join("symbols.txt");
 
-    // Partial link
+    // Partial link with platform version (required on newer macOS)
     let status = Command::new("ld")
-        .args(["-arch", arch, "-r", "-o"])
+        .arg("-arch")
+        .arg(arch)
+        .arg("-r")
+        .arg("-platform_version")
+        .arg("macos")
+        .arg(if arch == "arm64" { "11.0" } else { "10.13" })
+        .arg("14.0")
+        .arg("-o")
         .arg(&intermediate)
         .arg("-all_load")
         .arg(static_lib)
