@@ -26,19 +26,6 @@ This library provides two filtering modes:
 - **Hides**: ONLY specific symbols (e.g., `rust_eh_personality`, `__rust_alloc`)
 - **Use case**: When you can't rename functions but need to hide conflicting symbols
 
-## Installation
-
-```bash
-cargo install --git
-```
-
-Or use directly from the repository:
-
-```bash
-cargo build --release
-# Binary will be at: target/release/staticlib-hygiene
-```
-
 ## How to Use
 
 ### As a CLI Tool (Post-Build)
@@ -205,9 +192,9 @@ pub extern "C" fn create() -> *mut MyLib { /* ... */ }  // No prefix!
 // This will be hidden and cause "undefined symbol: create" errors!
 ```
 
-## Demo Projects
+## Example Projects
 
-This repository includes three example projects in the `examples/` directory. See `DEMO.md` for a detailed walkthrough.
+This repository includes three example projects in the `examples/` directory.
 
 ### Quick Demo
 

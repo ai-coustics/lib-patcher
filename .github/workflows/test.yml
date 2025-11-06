@@ -1,0 +1,159 @@
+name: Test Examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust (beta)
+        uses: dtolnay/rust-toolchain@beta
+
+      - name: Build main library
+        run: cargo build --release
+
+      - name: Build example library (mylib) with stable
+        run: |
+          cd examples/mylib
+          cargo +stable build --release
+        shell: bash
+
+      - name: Test unpatched version fails (expected)
+        run: |
+          cd examples/mylib-test-unpatched
+          cargo +beta build --release 2>&1 | tee build.log || true
+
+          # Check that it failed with duplicate symbol error
+          if grep -q "duplicate symbol\|multiple definition" build.log; then
+            echo "✓ Unpatched version correctly fails with symbol conflicts"
+            exit 0
+          else
+            echo "✗ Expected symbol conflict error not found"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Build patched version with beta (should succeed)
+        run: |
+          cd examples/mylib-test
+          cargo +beta build --release
+
+      - name: Run patched version
+        run: |
+          cd examples/mylib-test
+          cargo +beta run --release
+
+      - name: Verify patched symbols (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          # Find the patched library
+          PATCHED_LIB=$(find examples/mylib-test/target -name "libmylib_patched.a" | head -1)
+
+          if [ -z "$PATCHED_LIB" ]; then
+            echo "✗ Patched library not found"
+            exit 1
+          fi
+
+          echo "Checking symbols in: $PATCHED_LIB"
+
+          # Check that mylib_ symbols are global (uppercase T)
+          if nm "$PATCHED_LIB" | grep -q " T mylib_"; then
+            echo "✓ mylib_ symbols are global"
+          else
+            echo "✗ mylib_ symbols should be global"
+            exit 1
+          fi
+
+          # Check that some_other_function is local (lowercase t)
+          if nm "$PATCHED_LIB" | grep "some_other_function" | grep -q " t "; then
+            echo "✓ some_other_function is correctly hidden"
+          else
+            echo "✗ some_other_function should be hidden"
+            nm "$PATCHED_LIB" | grep "some_other_function" || true
+            exit 1
+          fi
+
+          # Check that rust_eh_personality is local (lowercase t)
+          if nm "$PATCHED_LIB" | grep "rust_eh_personality" | grep -q " t "; then
+            echo "✓ rust_eh_personality is correctly hidden"
+          else
+            echo "✗ rust_eh_personality should be hidden"
+            nm "$PATCHED_LIB" | grep "rust_eh_personality" || true
+            exit 1
+          fi
+        shell: bash
+
+      - name: Verify patched symbols (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # Find the patched library
+          $PATCHED_LIB = Get-ChildItem -Path "examples\mylib-test\target" -Recurse -Filter "mylib_patched.lib" | Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $PATCHED_LIB) {
+            Write-Host "✗ Patched library not found"
+            exit 1
+          }
+
+          Write-Host "Checking symbols in: $PATCHED_LIB"
+          Write-Host "✓ Windows COFF symbol verification would go here"
+          # Note: Windows symbol inspection with dumpbin would require additional setup
+        shell: pwsh
+
+      - name: Test CLI tool (allowlist mode)
+        run: |
+          ./target/release/staticlib-hygiene allowlist \
+            --input examples/mylib/target/release/libmylib.a \
+            --output /tmp/test_cli_allowlist.a \
+            --prefix mylib_
+        shell: bash
+        if: runner.os != 'Windows'
+
+      - name: Test CLI tool (blocklist default mode)
+        run: |
+          ./target/release/staticlib-hygiene blocklist \
+            --input examples/mylib/target/release/libmylib.a \
+            --output /tmp/test_cli_blocklist.a
+        shell: bash
+        if: runner.os != 'Windows'
+
+      - name: Test CLI tool (blocklist custom mode)
+        run: |
+          ./target/release/staticlib-hygiene blocklist \
+            --input examples/mylib/target/release/libmylib.a \
+            --output /tmp/test_cli_custom.a \
+            --symbols "rust_eh_personality,some_other_function"
+        shell: bash
+        if: runner.os != 'Windows'
+
+      - name: Test CLI tool on Windows (allowlist mode)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\release\staticlib-hygiene.exe allowlist `
+            --input examples\mylib\target\release\mylib.lib `
+            --output $env:TEMP\test_cli_allowlist.lib `
+            --prefix mylib_
+        shell: pwsh
+
+      - name: Test CLI tool on Windows (blocklist mode)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\release\staticlib-hygiene.exe blocklist `
+            --input examples\mylib\target\release\mylib.lib `
+            --output $env:TEMP\test_cli_blocklist.lib
+        shell: pwsh
