@@ -32,6 +32,12 @@ This library provides two filtering modes:
 
 The CLI provides two subcommands for the two filtering modes.
 
+### Install CLI
+
+```sh
+cargo install --git ssh://git@github.com/ai-coustics/libcut.git libcut
+````
+
 #### Allowlist Mode (keep only prefixed symbols)
 
 ```bash
