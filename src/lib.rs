@@ -307,12 +307,12 @@ fn patch_coff_object(
         let id = writer.add_section(Vec::new(), name.clone(), kind);
 
         let align = section.align();
-        if kind != SectionKind::UninitializedData {
-            if let Ok(data) = section.uncompressed_data() {
-                let data_bytes = data.into_owned();
-                if !data_bytes.is_empty() {
-                    writer.section_mut(id).set_data(data_bytes, align);
-                }
+        if kind != SectionKind::UninitializedData
+            && let Ok(data) = section.uncompressed_data()
+        {
+            let data_bytes = data.into_owned();
+            if !data_bytes.is_empty() {
+                writer.section_mut(id).set_data(data_bytes, align);
             }
         }
 
