@@ -146,7 +146,7 @@ fn patch_windows(
     lib_name: &str,
     mode: &FilterMode,
     final_lib: &Path,
-    _target_arch: Option<&str>,
+    target_arch: Option<&str>,
 ) {
     use std::io::Read;
 
@@ -172,16 +172,115 @@ fn patch_windows(
         obj_files.push(out_path);
     }
 
-    // Create library using lib.exe
-    let mut cmd = Command::new("lib.exe");
-    cmd.arg("/nologo")
-        .arg(format!("/OUT:{}", final_lib.display()));
+    // Determine which library tool to use and the machine type
+    let lib_cmd = get_windows_lib_tool(target_arch);
+
+    // Create library
+    let mut cmd = Command::new(&lib_cmd.tool);
+
+    if lib_cmd.is_llvm {
+        // LLVM-lib syntax
+        if let Some(machine) = &lib_cmd.machine_type {
+            cmd.arg(format!("/MACHINE:{}", machine));
+        }
+        cmd.arg(format!("/OUT:{}", final_lib.display()));
+    } else {
+        // MSVC lib.exe syntax
+        cmd.arg("/nologo");
+        if let Some(machine) = &lib_cmd.machine_type {
+            cmd.arg(format!("/MACHINE:{}", machine));
+        }
+        cmd.arg(format!("/OUT:{}", final_lib.display()));
+    }
+
     for obj in &obj_files {
         cmd.arg(obj);
     }
-    assert!(cmd.status().expect("Failed to run lib.exe").success());
+
+    let status = cmd.status().unwrap_or_else(|_| {
+        panic!(
+            "Failed to run {}. For cross-architecture patching, install LLVM tools.",
+            lib_cmd.tool
+        )
+    });
+    assert!(status.success(), "{} failed", lib_cmd.tool);
 
     fs::remove_dir_all(&temp_dir).ok();
+}
+
+struct WindowsLibTool {
+    tool: String,
+    machine_type: Option<String>,
+    is_llvm: bool,
+}
+
+/// Determines the appropriate library tool for Windows
+fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
+    // Determine target architecture
+    let target_arch_str = target_arch
+        .map(|s| s.to_string())
+        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
+        .unwrap_or_else(|| {
+            if cfg!(target_arch = "aarch64") {
+                "aarch64".to_string()
+            } else if cfg!(target_arch = "x86_64") {
+                "x86_64".to_string()
+            } else if cfg!(target_arch = "x86") {
+                "x86".to_string()
+            } else {
+                std::env::consts::ARCH.to_string()
+            }
+        });
+
+    let host_arch = std::env::consts::ARCH;
+
+    // Map architecture to MSVC machine type
+    let machine_type = match target_arch_str.as_str() {
+        "aarch64" | "arm64" => Some("ARM64".to_string()),
+        "x86_64" => Some("X64".to_string()),
+        "x86" | "i686" => Some("X86".to_string()),
+        "arm" => Some("ARM".to_string()),
+        _ => None,
+    };
+
+    // Check if we're doing cross-architecture
+    let is_cross = target_arch_str != host_arch;
+
+    if is_cross {
+        // For cross-architecture, prefer llvm-lib as it's more flexible
+        if Command::new("llvm-lib").arg("/?").output().is_ok() {
+            eprintln!(
+                "Using llvm-lib for cross-architecture Windows build ({} -> {})",
+                host_arch, target_arch_str
+            );
+            return WindowsLibTool {
+                tool: "llvm-lib".to_string(),
+                machine_type,
+                is_llvm: true,
+            };
+        } else if Command::new("lld-link").arg("--version").output().is_ok() {
+            // Try to find llvm-lib in the same directory as lld-link
+            eprintln!("llvm-lib not found, but lld-link exists. Using llvm-lib anyway.");
+            return WindowsLibTool {
+                tool: "llvm-lib".to_string(),
+                machine_type,
+                is_llvm: true,
+            };
+        } else {
+            eprintln!(
+                "Warning: Cross-architecture patching ({} -> {}) may fail with lib.exe",
+                host_arch, target_arch_str
+            );
+            eprintln!("Consider installing LLVM tools for better cross-compilation support.");
+        }
+    }
+
+    // Use native lib.exe
+    WindowsLibTool {
+        tool: "lib.exe".to_string(),
+        machine_type,
+        is_llvm: false,
+    }
 }
 
 fn patch_coff_object(
