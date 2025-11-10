@@ -59,6 +59,7 @@ impl FilterMode {
 /// * `lib_name` - Base name for temporary files (e.g., "mylib")
 /// * `mode` - Filtering mode (Allowlist or Blocklist)
 /// * `final_lib` - Path where the patched library will be written
+/// * `target_arch` - Optional target architecture (e.g., "aarch64", "x86_64"). If `None`, uses host architecture.
 ///
 /// # Panics
 ///
@@ -72,12 +73,24 @@ impl FilterMode {
 /// use libcut::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
+/// // Native architecture
 /// patch_lib(
 ///     Path::new("target/release/libmylib.a"),
 ///     Path::new("out"),
 ///     "mylib",
 ///     FilterMode::Allowlist { prefix: "mylib_".to_string() },
 ///     Path::new("libmylib_patched.a"),
+///     None,
+/// );
+///
+/// // Cross-architecture (e.g., arm64 library on x86_64 host)
+/// patch_lib(
+///     Path::new("target/aarch64-unknown-linux-gnu/release/libmylib.a"),
+///     Path::new("out"),
+///     "mylib",
+///     FilterMode::Allowlist { prefix: "mylib_".to_string() },
+///     Path::new("libmylib_patched.a"),
+///     Some("aarch64"),
 /// );
 /// ```
 ///
@@ -93,6 +106,7 @@ impl FilterMode {
 ///     "thirdparty",
 ///     FilterMode::default_blocklist(),
 ///     Path::new("libthirdparty_patched.a"),
+///     None,
 /// );
 /// ```
 pub fn patch_lib(
@@ -101,6 +115,7 @@ pub fn patch_lib(
     lib_name: &str,
     mode: FilterMode,
     final_lib: &Path,
+    target_arch: Option<&str>,
 ) {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
         // Fall back to detecting the current OS if not in a cargo build context
@@ -116,9 +131,11 @@ pub fn patch_lib(
     });
 
     match target_os.as_str() {
-        "windows" => patch_windows(static_lib, out_dir, lib_name, &mode, final_lib),
-        "macos" | "ios" => patch_macos(static_lib, out_dir, lib_name, &mode, final_lib),
-        _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib),
+        "windows" => patch_windows(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
+        "macos" | "ios" => {
+            patch_macos(static_lib, out_dir, lib_name, &mode, final_lib, target_arch)
+        }
+        _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
     }
 }
 
@@ -129,6 +146,7 @@ fn patch_windows(
     lib_name: &str,
     mode: &FilterMode,
     final_lib: &Path,
+    _target_arch: Option<&str>,
 ) {
     use std::io::Read;
 
@@ -325,11 +343,13 @@ fn patch_macos(
     lib_name: &str,
     mode: &FilterMode,
     final_lib: &Path,
+    target_arch: Option<&str>,
 ) {
-    // Check LIBCUT_TARGET_ARCH first (for CLI usage), then CARGO_CFG_TARGET_ARCH (for build.rs)
-    let target_arch = env::var("LIBCUT_TARGET_ARCH")
-        .or_else(|_| env::var("CARGO_CFG_TARGET_ARCH"))
-        .unwrap_or_else(|_| {
+    // Determine target architecture from parameter, env var, or host detection
+    let target_arch_str = target_arch
+        .map(|s| s.to_string())
+        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
+        .unwrap_or_else(|| {
             // Fall back to detecting the current architecture
             if cfg!(target_arch = "aarch64") {
                 "aarch64".to_string()
@@ -337,7 +357,7 @@ fn patch_macos(
                 "x86_64".to_string()
             }
         });
-    let arch = match target_arch.as_str() {
+    let arch = match target_arch_str.as_str() {
         "aarch64" | "arm64" => "arm64",
         "x86_64" => "x86_64",
         a => a,
@@ -509,49 +529,74 @@ fn patch_linux(
     lib_name: &str,
     mode: &FilterMode,
     final_lib: &Path,
+    target_arch: Option<&str>,
 ) {
+    // Determine target architecture from parameter, env var, or host detection
+    let target_arch_str = target_arch
+        .map(|s| s.to_string())
+        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
+        .unwrap_or_else(|| {
+            // Fall back to detecting the current architecture
+            if cfg!(target_arch = "aarch64") {
+                "aarch64".to_string()
+            } else if cfg!(target_arch = "x86_64") {
+                "x86_64".to_string()
+            } else if cfg!(target_arch = "arm") {
+                "arm".to_string()
+            } else if cfg!(target_arch = "x86") {
+                "x86".to_string()
+            } else {
+                std::env::consts::ARCH.to_string()
+            }
+        });
+
+    // Determine the appropriate binutils prefix for cross-compilation
+    let (ld_cmd, objcopy_cmd, ar_cmd) = get_linux_toolchain(&target_arch_str);
+
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let final_obj = out_dir.join(format!("{}_final.o", lib_name));
 
     // Partial link
-    let status = Command::new("ld")
+    let status = Command::new(&ld_cmd)
         .args(["-r", "-o"])
         .arg(&intermediate)
         .arg("--whole-archive")
         .arg(static_lib)
         .status()
-        .expect("Failed to run ld");
-    assert!(status.success(), "ld -r failed");
+        .unwrap_or_else(|_| panic!("Failed to run {}", ld_cmd));
+    assert!(status.success(), "{} -r failed", ld_cmd);
 
     // Filter symbols based on mode
     match mode {
         FilterMode::Allowlist { prefix } => {
             // Use objcopy with wildcard to keep only prefixed symbols
             let wildcard = format!("{}*", prefix);
-            let status = Command::new("objcopy")
+            let status = Command::new(&objcopy_cmd)
                 .arg("--wildcard")
                 .arg("--keep-global-symbol")
                 .arg(&wildcard)
                 .arg(&intermediate)
                 .arg(&final_obj)
                 .status()
-                .expect("Failed to run objcopy");
-            assert!(status.success(), "objcopy failed");
+                .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
+            assert!(status.success(), "{} failed", objcopy_cmd);
         }
         FilterMode::Blocklist { remove } => {
             // Use objcopy to localize specific symbols
-            let mut cmd = Command::new("objcopy");
+            let mut cmd = Command::new(&objcopy_cmd);
             for symbol in remove {
                 cmd.arg("--localize-symbol").arg(symbol);
             }
             cmd.arg(&intermediate).arg(&final_obj);
-            let status = cmd.status().expect("Failed to run objcopy");
-            assert!(status.success(), "objcopy failed");
+            let status = cmd
+                .status()
+                .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
+            assert!(status.success(), "{} failed", objcopy_cmd);
         }
     }
 
-    // Create archive (try ar, fallback to llvm-ar)
-    let ar_result = Command::new("ar")
+    // Create archive (try specified ar, fallback to llvm-ar)
+    let ar_result = Command::new(&ar_cmd)
         .args(["rcs"])
         .arg(final_lib)
         .arg(&final_obj)
@@ -564,9 +609,60 @@ fn patch_linux(
             .arg(&final_obj)
             .status()
             .expect("Failed to run llvm-ar");
-        assert!(status.success(), "Both ar and llvm-ar failed");
+        assert!(status.success(), "Both {} and llvm-ar failed", ar_cmd);
     }
 
     fs::remove_file(&intermediate).ok();
     fs::remove_file(&final_obj).ok();
+}
+
+/// Determines the appropriate toolchain for the target architecture on Linux
+///
+/// Returns a tuple of (ld_command, objcopy_command, ar_command)
+fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
+    let host_arch = std::env::consts::ARCH;
+
+    // If targeting the same architecture as host, use native tools
+    if target_arch == host_arch {
+        return ("ld".to_string(), "objcopy".to_string(), "ar".to_string());
+    }
+
+    // For cross-compilation, determine the GNU triplet prefix
+    let triplet_prefix = match target_arch {
+        "aarch64" | "arm64" => "aarch64-linux-gnu",
+        "arm" | "armv7" => "arm-linux-gnueabihf",
+        "x86_64" => "x86_64-linux-gnu",
+        "x86" | "i686" => "i686-linux-gnu",
+        "riscv64" => "riscv64-linux-gnu",
+        "powerpc64" => "powerpc64-linux-gnu",
+        "powerpc64le" => "powerpc64le-linux-gnu",
+        "s390x" => "s390x-linux-gnu",
+        _ => {
+            eprintln!(
+                "Warning: Unknown target architecture '{}', falling back to native tools",
+                target_arch
+            );
+            return ("ld".to_string(), "objcopy".to_string(), "ar".to_string());
+        }
+    };
+
+    let ld = format!("{}-ld", triplet_prefix);
+    let objcopy = format!("{}-objcopy", triplet_prefix);
+    let ar = format!("{}-ar", triplet_prefix);
+
+    // Check if cross-compilation tools exist, fallback to native if not
+    if Command::new(&ld).arg("--version").output().is_ok() {
+        eprintln!("Using cross-compilation toolchain: {}-*", triplet_prefix);
+        (ld, objcopy, ar)
+    } else {
+        eprintln!(
+            "Warning: Cross-compilation tools for {} not found (tried {}), falling back to native tools",
+            target_arch, ld
+        );
+        eprintln!(
+            "To install: sudo apt-get install binutils-{}",
+            triplet_prefix
+        );
+        ("ld".to_string(), "objcopy".to_string(), "ar".to_string())
+    }
 }

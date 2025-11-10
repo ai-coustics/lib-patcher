@@ -43,6 +43,12 @@ enum Commands {
         /// Directory for temporary files (defaults to system temp dir)
         #[arg(short, long, value_name = "DIR")]
         temp_dir: Option<PathBuf>,
+
+        /// Target architecture (e.g., "aarch64", "x86_64", "arm64")
+        /// If not specified, uses the current host architecture.
+        /// On Linux, this enables cross-architecture patching (requires cross-compilation tools).
+        #[arg(short = 'a', long, value_name = "ARCH")]
+        arch: Option<String>,
     },
 
     /// Blocklist mode: Hide specific symbols (for third-party libraries)
@@ -79,6 +85,12 @@ enum Commands {
         /// Directory for temporary files (defaults to system temp dir)
         #[arg(short, long, value_name = "DIR")]
         temp_dir: Option<PathBuf>,
+
+        /// Target architecture (e.g., "aarch64", "x86_64", "arm64")
+        /// If not specified, uses the current host architecture.
+        /// On Linux, this enables cross-architecture patching (requires cross-compilation tools).
+        #[arg(short = 'a', long, value_name = "ARCH")]
+        arch: Option<String>,
     },
 }
 
@@ -92,6 +104,7 @@ fn main() {
             prefix,
             name,
             temp_dir,
+            arch,
         } => {
             // Validate input file exists
             if !input.exists() {
@@ -117,9 +130,12 @@ fn main() {
                 "  Prefix: {} (only symbols starting with this will be kept)",
                 prefix
             );
+            if let Some(ref arch_val) = arch {
+                println!("  Arch:   {} (cross-compilation mode)", arch_val);
+            }
             println!("  Temp:   {}", temp_dir.display());
 
-            patch_lib(&input, &temp_dir, &name, mode, &output);
+            patch_lib(&input, &temp_dir, &name, mode, &output, arch.as_deref());
 
             println!("✓ Successfully patched library!");
             println!("  Only symbols starting with '{}' are now public.", prefix);
@@ -131,6 +147,7 @@ fn main() {
             symbols,
             name,
             temp_dir,
+            arch,
         } => {
             // Validate input file exists
             if !input.exists() {
@@ -177,9 +194,12 @@ fn main() {
                     println!("          {}", symbols_list.join(", "));
                 }
             }
+            if let Some(ref arch_val) = arch {
+                println!("  Arch:   {} (cross-compilation mode)", arch_val);
+            }
             println!("  Temp:   {}", temp_dir.display());
 
-            patch_lib(&input, &temp_dir, &name, mode, &output);
+            patch_lib(&input, &temp_dir, &name, mode, &output, arch.as_deref());
 
             println!("✓ Successfully patched library!");
             println!("  {} symbols are now hidden.", symbols_list.len());

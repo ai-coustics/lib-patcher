@@ -50,6 +50,7 @@ fn main() {
             prefix: "mylib_".to_string(),
         },
         &patched_lib,
+        None, // Use host architecture
     );
 
     println!("cargo:warning=Patching complete!");
