@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use libcut::{FilterMode, patch_lib};
+use lib_patcher::{FilterMode, patch_lib};
 use std::path::PathBuf;
 
 /// Symbol filtering tool for cross-platform static libraries
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// This tool filters static library symbols to prevent linking conflicts when
 /// linking multiple Rust static libraries together.
 #[derive(Parser, Debug)]
-#[command(name = "libcut")]
+#[command(name = "lib-patcher")]
 #[command(version, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
@@ -208,8 +208,9 @@ fn main() {
 }
 
 fn get_temp_dir(temp_dir: Option<PathBuf>) -> PathBuf {
-    let dir = temp_dir
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("libcut-{}", std::process::id())));
+    let dir = temp_dir.unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("lib-patcher-{}", std::process::id()))
+    });
 
     // Create temp dir if it doesn't exist
     if !dir.exists()

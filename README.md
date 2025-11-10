@@ -1,4 +1,4 @@
-# libcut
+# lib-patcher
 
 Symbol filtering for cross-platform static libraries to prevent linking conflicts.
 
@@ -35,13 +35,13 @@ The CLI provides two subcommands for the two filtering modes.
 ### Install CLI
 
 ```sh
-cargo install --git ssh://git@github.com/ai-coustics/libcut.git libcut
+cargo install --git ssh://git@github.com/ai-coustics/lib-patcher.git lib-patcher
 ````
 
 #### Allowlist Mode (keep only prefixed symbols)
 
 ```bash
-libcut allowlist \
+lib-patcher allowlist \
   --input target/release/libmylib.a \
   --output target/release/libmylib_patched.a \
   --prefix mylib_
@@ -58,12 +58,12 @@ libcut allowlist \
 
 ```bash
 # Use default blocklist (hides common Rust stdlib symbols)
-libcut blocklist \
+lib-patcher blocklist \
   --input vendor/libthirdparty.a \
   --output vendor/libthirdparty_patched.a
 
 # Or use custom blocklist
-libcut blocklist \
+lib-patcher blocklist \
   --input vendor/lib2.a \
   --output vendor/lib2_patched.a \
   --symbols "rust_eh_personality,my_conflict,__rust_alloc"
@@ -91,7 +91,7 @@ You can also use it programmatically in your `build.rs`. There are two filtering
 Keeps ONLY symbols with your prefix. All other symbols are hidden.
 
 ```rust
-use libcut::{patch_lib, FilterMode};
+use lib_patcher::{patch_lib, FilterMode};
 use std::env;
 use std::path::Path;
 
@@ -127,7 +127,7 @@ pub extern "C" fn init() { }        // ✗ Will be hidden!
 Hides ONLY specific symbols. Everything else remains visible.
 
 ```rust
-use libcut::{patch_lib, FilterMode};
+use lib_patcher::{patch_lib, FilterMode};
 
 // Use default blocklist (hides common Rust stdlib symbols)
 patch_lib(

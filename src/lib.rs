@@ -70,7 +70,7 @@ impl FilterMode {
 /// ## Allowlist mode (library you control)
 ///
 /// ```rust,no_run
-/// use libcut::{patch_lib, FilterMode};
+/// use lib_patcher::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
 /// // Native architecture
@@ -97,7 +97,7 @@ impl FilterMode {
 /// ## Blocklist mode (third-party library)
 ///
 /// ```rust,no_run
-/// use libcut::{patch_lib, FilterMode};
+/// use lib_patcher::{patch_lib, FilterMode};
 /// use std::path::Path;
 ///
 /// patch_lib(
