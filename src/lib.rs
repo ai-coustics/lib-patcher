@@ -326,15 +326,19 @@ fn patch_macos(
     mode: &FilterMode,
     final_lib: &Path,
 ) {
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| {
-        if cfg!(target_arch = "aarch64") {
-            "aarch64".to_string()
-        } else {
-            "x86_64".to_string()
-        }
-    });
+    // Check LIBCUT_TARGET_ARCH first (for CLI usage), then CARGO_CFG_TARGET_ARCH (for build.rs)
+    let target_arch = env::var("LIBCUT_TARGET_ARCH")
+        .or_else(|_| env::var("CARGO_CFG_TARGET_ARCH"))
+        .unwrap_or_else(|_| {
+            // Fall back to detecting the current architecture
+            if cfg!(target_arch = "aarch64") {
+                "aarch64".to_string()
+            } else {
+                "x86_64".to_string()
+            }
+        });
     let arch = match target_arch.as_str() {
-        "aarch64" => "arm64",
+        "aarch64" | "arm64" => "arm64",
         "x86_64" => "x86_64",
         a => a,
     };
@@ -368,11 +372,12 @@ fn patch_macos(
             continue;
         }
 
-        let nm_out = Command::new("nm")
+        let nm_out = Command::new("xcrun")
+            .arg("nm")
             .args(["-g", "-U"])
             .arg(&path)
             .output()
-            .expect("Failed to run nm");
+            .expect("Failed to run xcrun nm");
 
         if nm_out.status.success() {
             let symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
@@ -400,7 +405,9 @@ fn patch_macos(
     );
 
     // Now create the intermediate object with ld -r
-    let output = Command::new("ld")
+    // Use xcrun to ensure we get the right ld that supports the target architecture
+    let output = Command::new("xcrun")
+        .arg("ld")
         .arg("-arch")
         .arg(arch)
         .arg("-r")
@@ -413,10 +420,14 @@ fn patch_macos(
         .arg("-all_load")
         .arg(static_lib)
         .output()
-        .expect("Failed to run ld");
+        .expect("Failed to run xcrun ld");
 
     eprintln!("DEBUG: ld exit status: {}", output.status);
-    assert!(output.status.success(), "ld -r failed");
+    if !output.status.success() {
+        eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!("ld stdout: {}", String::from_utf8_lossy(&output.stdout));
+        panic!("ld -r failed");
+    }
 
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
@@ -465,14 +476,15 @@ fn patch_macos(
     let final_obj = out_dir.join(format!("{}_final.o", lib_name));
 
     // Filter symbols
-    let status = Command::new("ld")
+    let status = Command::new("xcrun")
+        .arg("ld")
         .args(["-arch", arch, "-r", "-o"])
         .arg(&final_obj)
         .arg("-exported_symbols_list")
         .arg(&symbols_file)
         .arg(&intermediate)
         .status()
-        .expect("Failed to run ld filter");
+        .expect("Failed to run xcrun ld filter");
     assert!(status.success(), "ld symbol filter failed");
 
     // Create archive
