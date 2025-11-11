@@ -176,6 +176,11 @@ fn patch_windows(
     let lib_cmd = get_windows_lib_tool(target_arch);
 
     // Create library
+    // Convert final_lib to absolute path before changing directory
+    let final_lib_abs = std::fs::canonicalize(final_lib.parent().unwrap_or(Path::new(".")))
+        .expect("Failed to resolve output directory")
+        .join(final_lib.file_name().unwrap());
+
     let mut cmd = Command::new(&lib_cmd.tool);
 
     if lib_cmd.is_llvm {
@@ -183,18 +188,24 @@ fn patch_windows(
         if let Some(machine) = &lib_cmd.machine_type {
             cmd.arg(format!("/MACHINE:{}", machine));
         }
-        cmd.arg(format!("/OUT:{}", final_lib.display()));
+        cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
     } else {
         // MSVC lib.exe syntax
         cmd.arg("/nologo");
         if let Some(machine) = &lib_cmd.machine_type {
             cmd.arg(format!("/MACHINE:{}", machine));
         }
-        cmd.arg(format!("/OUT:{}", final_lib.display()));
+        cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
     }
 
+    // Change to temp directory and use relative paths to avoid storing absolute paths in archive
+    cmd.current_dir(&temp_dir);
+
     for obj in &obj_files {
-        cmd.arg(obj);
+        // Use just the filename relative to temp_dir
+        if let Some(filename) = obj.file_name() {
+            cmd.arg(filename);
+        }
     }
 
     let status = cmd.status().unwrap_or_else(|_| {
@@ -518,11 +529,6 @@ fn patch_macos(
     all_symbols.sort();
     all_symbols.dedup();
 
-    eprintln!(
-        "DEBUG: Found {} unique symbols from object files",
-        all_symbols.len()
-    );
-
     // Now create the intermediate object with ld -r
     // Use xcrun to ensure we get the right ld that supports the target architecture
     let output = Command::new("xcrun")
@@ -541,7 +547,6 @@ fn patch_macos(
         .output()
         .expect("Failed to run xcrun ld");
 
-    eprintln!("DEBUG: ld exit status: {}", output.status);
     if !output.status.success() {
         eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
         eprintln!("ld stdout: {}", String::from_utf8_lossy(&output.stdout));
@@ -551,18 +556,12 @@ fn patch_macos(
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
         FilterMode::Allowlist { prefix } => {
-            eprintln!("DEBUG: Filtering with prefix '{}'", prefix);
             all_symbols
                 .into_iter()
                 .filter(|sym| {
                     // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
                     let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
-                    let matches =
-                        sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix);
-                    if matches {
-                        eprintln!("DEBUG: Keeping symbol: {}", sym);
-                    }
-                    matches
+                    sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
                 })
                 .collect()
         }
