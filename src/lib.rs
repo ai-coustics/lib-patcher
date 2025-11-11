@@ -187,11 +187,9 @@ fn patch_windows(
     let mut cmd = Command::new(&lib_cmd.tool);
 
     if lib_cmd.is_llvm {
-        // LLVM-lib syntax
-        if let Some(machine) = &lib_cmd.machine_type {
-            cmd.arg(format!("/MACHINE:{}", machine));
-        }
-        cmd.arg(format!("/OUT:{}", final_lib.display()));
+        // llvm-ar uses standard ar syntax
+        cmd.arg("rcs");
+        cmd.arg(final_lib);
     } else {
         // MSVC lib.exe syntax
         cmd.arg("/nologo");
@@ -254,41 +252,40 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     // Check if we're doing cross-architecture
     let is_cross = target_arch_str != host_arch;
 
-    if is_cross {
-        // For cross-architecture, prefer llvm-ar as it's more reliable than llvm-lib
-        if Command::new("llvm-ar").arg("--version").output().is_ok() {
+    // Try to use llvm-ar first (available via rustup component add llvm-tools-preview)
+    // This works for both native and cross-compilation scenarios
+    if Command::new("llvm-ar").arg("--version").output().is_ok() {
+        if is_cross {
             eprintln!(
                 "Using llvm-ar for cross-architecture Windows build ({} -> {})",
                 host_arch, target_arch_str
             );
-            return WindowsLibTool {
-                tool: "llvm-ar".to_string(),
-                machine_type,
-                is_llvm: true,
-            };
-        } else if Command::new("lld-link").arg("--version").output().is_ok() {
-            // Try to find llvm-ar in the same directory as lld-link
-            eprintln!("llvm-ar not found, but lld-link exists. Using llvm-ar anyway.");
-            return WindowsLibTool {
-                tool: "llvm-ar".to_string(),
-                machine_type,
-                is_llvm: true,
-            };
         } else {
-            eprintln!(
-                "Warning: Cross-architecture patching ({} -> {}) may fail with lib.exe",
-                host_arch, target_arch_str
-            );
-            eprintln!("Consider installing LLVM tools for better cross-compilation support.");
+            eprintln!("Using llvm-ar for Windows build");
         }
+        return WindowsLibTool {
+            tool: "llvm-ar".to_string(),
+            machine_type,
+            is_llvm: true,
+        };
     }
 
-    // Use native lib.exe
-    WindowsLibTool {
-        tool: "lib.exe".to_string(),
-        machine_type,
-        is_llvm: false,
+    // Fall back to lib.exe (requires MSVC Build Tools)
+    if Command::new("lib.exe").arg("/?").output().is_ok() {
+        eprintln!("Using lib.exe for Windows build");
+        return WindowsLibTool {
+            tool: "lib.exe".to_string(),
+            machine_type,
+            is_llvm: false,
+        };
     }
+
+    // No suitable tool found
+    panic!(
+        "No library archiver tool found for Windows. Please install one of:\n\
+         1. LLVM tools (recommended): rustup component add llvm-tools-preview\n\
+         2. MSVC Build Tools: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022"
+    );
 }
 
 fn patch_coff_object(
@@ -917,11 +914,13 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
         // Collect global/public symbols
         for symbol in file.symbols() {
             // Only include global/public symbols
-            if symbol.is_global() && symbol.is_definition()
+            if symbol.is_global()
+                && symbol.is_definition()
                 && let Ok(name) = symbol.name()
-                    && !name.is_empty() {
-                        symbols.insert(name.to_string());
-                    }
+                && !name.is_empty()
+            {
+                symbols.insert(name.to_string());
+            }
         }
     }
 
