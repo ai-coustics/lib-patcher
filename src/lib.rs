@@ -186,9 +186,14 @@ fn patch_windows(
 
     // Create library
     // Convert final_lib to absolute path before changing directory
-    let final_lib_abs = std::fs::canonicalize(final_lib.parent().unwrap_or(Path::new(".")))
-        .expect("Failed to resolve output directory")
-        .join(final_lib.file_name().unwrap());
+    let final_lib_abs = if final_lib.is_absolute() {
+        final_lib.to_path_buf()
+    } else {
+        // Make relative path absolute by prepending current directory
+        std::env::current_dir()
+            .expect("Failed to get current directory")
+            .join(final_lib)
+    };
 
     let mut cmd = Command::new(&lib_cmd.tool);
 
