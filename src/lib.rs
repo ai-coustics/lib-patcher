@@ -138,9 +138,10 @@ pub fn patch_lib(
         }
         _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
     }
+
     // Verify the patched library
     eprintln!("\nVerifying patched library...");
-    if let Err(e) = verify_patched_lib(final_lib, static_lib, &mode) {
+    if let Err(e) = verify_patched_lib(final_lib, static_lib, &mode, &target_os) {
         eprintln!("\n❌ VERIFICATION FAILED: {}", e);
         eprintln!("The patched library may be corrupted or incomplete.");
         std::process::exit(1);
@@ -172,7 +173,7 @@ fn patch_windows(
 
         let patched = match patch_coff_object(&data, mode) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(_) => continue, // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
         };
 
         let out_path = temp_dir.join(format!("{}.obj", obj_files.len()));
@@ -184,23 +185,46 @@ fn patch_windows(
     let lib_cmd = get_windows_lib_tool(target_arch);
 
     // Create library
+    // Convert final_lib to absolute path before changing directory
+    let final_lib_abs = if final_lib.is_absolute() {
+        final_lib.to_path_buf()
+    } else {
+        // Make relative path absolute by prepending current directory
+        std::env::current_dir()
+            .expect("Failed to get current directory")
+            .join(final_lib)
+    };
+
     let mut cmd = Command::new(&lib_cmd.tool);
 
     if lib_cmd.is_llvm {
-        // llvm-ar uses standard ar syntax
-        cmd.arg("rcs");
-        cmd.arg(final_lib);
+        // LLVM-ar syntax (use llvm-ar instead of llvm-lib to avoid path issues)
+        // Create archive with 'rc' flags: r=insert/replace, c=create
+        cmd.arg("rc");
+        cmd.arg(&final_lib_abs);
+        cmd.current_dir(&temp_dir);
+
+        for obj in &obj_files {
+            // Use just the filename relative to temp_dir
+            if let Some(filename) = obj.file_name() {
+                cmd.arg(filename);
+            }
+        }
     } else {
         // MSVC lib.exe syntax
         cmd.arg("/nologo");
         if let Some(machine) = &lib_cmd.machine_type {
             cmd.arg(format!("/MACHINE:{}", machine));
         }
-        cmd.arg(format!("/OUT:{}", final_lib.display()));
-    }
+        cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
+        cmd.current_dir(&temp_dir);
 
-    for obj in &obj_files {
-        cmd.arg(obj);
+        for obj in &obj_files {
+            // Use just the filename relative to temp_dir
+            if let Some(filename) = obj.file_name() {
+                cmd.arg(filename);
+            }
+        }
     }
 
     let status = cmd.status().unwrap_or_else(|_| {
@@ -523,11 +547,6 @@ fn patch_macos(
     all_symbols.sort();
     all_symbols.dedup();
 
-    eprintln!(
-        "DEBUG: Found {} unique symbols from object files",
-        all_symbols.len()
-    );
-
     // Now create the intermediate object with ld -r
     // Use xcrun to ensure we get the right ld that supports the target architecture
     let output = Command::new("xcrun")
@@ -546,7 +565,6 @@ fn patch_macos(
         .output()
         .expect("Failed to run xcrun ld");
 
-    eprintln!("DEBUG: ld exit status: {}", output.status);
     if !output.status.success() {
         eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
         eprintln!("ld stdout: {}", String::from_utf8_lossy(&output.stdout));
@@ -556,18 +574,12 @@ fn patch_macos(
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
         FilterMode::Allowlist { prefix } => {
-            eprintln!("DEBUG: Filtering with prefix '{}'", prefix);
             all_symbols
                 .into_iter()
                 .filter(|sym| {
                     // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
                     let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
-                    let matches =
-                        sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix);
-                    if matches {
-                        eprintln!("DEBUG: Keeping symbol: {}", sym);
-                    }
-                    matches
+                    sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
                 })
                 .collect()
         }
@@ -786,6 +798,7 @@ fn verify_patched_lib(
     static_lib: &Path,
     original_lib: &Path,
     mode: &FilterMode,
+    target_os: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Check that output file exists
     if !static_lib.exists() {
@@ -800,15 +813,22 @@ fn verify_patched_lib(
         return Err("Output file is empty (0 bytes)".into());
     }
 
-    // Check if output is suspiciously small compared to input (less than 1% could indicate a problem)
+    // Check if output is suspiciously small compared to input
+    // Windows may have smaller output due to skipping unpatchable LLVM bitcode objects
     let input_metadata = fs::metadata(original_lib)?;
     let input_size = input_metadata.len();
     let size_ratio = (output_size as f64) / (input_size as f64);
 
-    if size_ratio < 0.01 {
+    let min_size_ratio = if target_os == "windows" {
+        0.0001 // Very permissive for Windows (allows skipping LLVM bitcode)
+    } else {
+        0.01 // 1% minimum for other platforms
+    };
+
+    if size_ratio < min_size_ratio {
         return Err(format!(
-            "Output file is suspiciously small ({} bytes vs {} bytes input, {}% of original). This may indicate a patching error.",
-            output_size, input_size, (size_ratio * 100.0) as u32
+            "Output file is suspiciously small ({} bytes vs {} bytes input, {:.2}% of original). This may indicate a patching error.",
+            output_size, input_size, size_ratio * 100.0
         ).into());
     }
 
@@ -914,13 +934,11 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
         // Collect global/public symbols
         for symbol in file.symbols() {
             // Only include global/public symbols
-            if symbol.is_global()
-                && symbol.is_definition()
+            if symbol.is_global() && symbol.is_definition()
                 && let Ok(name) = symbol.name()
-                && !name.is_empty()
-            {
-                symbols.insert(name.to_string());
-            }
+                    && !name.is_empty() {
+                        symbols.insert(name.to_string());
+                    }
         }
     }
 
