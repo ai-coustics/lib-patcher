@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -136,6 +137,14 @@ pub fn patch_lib(
             patch_macos(static_lib, out_dir, lib_name, &mode, final_lib, target_arch)
         }
         _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
+    }
+
+    // Verify the patched library
+    eprintln!("\nVerifying patched library...");
+    if let Err(e) = verify_patched_lib(final_lib, static_lib, &mode) {
+        eprintln!("\n❌ VERIFICATION FAILED: {}", e);
+        eprintln!("The patched library may be corrupted or incomplete.");
+        std::process::exit(1);
     }
 }
 
@@ -763,4 +772,163 @@ fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
         );
         ("ld".to_string(), "objcopy".to_string(), "ar".to_string())
     }
+}
+
+/// Verifies that a patched library meets the expected criteria
+///
+/// # Arguments
+///
+/// * `static_lib` - Path to the patched static library
+/// * `original_lib` - Path to the original static library (for size comparison)
+/// * `mode` - The filter mode that was applied
+///
+/// # Returns
+///
+/// A Result with Ok(()) if verification passes, or an error message if it fails
+fn verify_patched_lib(
+    static_lib: &Path,
+    original_lib: &Path,
+    mode: &FilterMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Check that output file exists
+    if !static_lib.exists() {
+        return Err("Output file was not created".into());
+    }
+
+    // 2. Check that output file has reasonable size (not empty, not suspiciously small)
+    let output_metadata = fs::metadata(static_lib)?;
+    let output_size = output_metadata.len();
+
+    if output_size == 0 {
+        return Err("Output file is empty (0 bytes)".into());
+    }
+
+    // Check if output is suspiciously small compared to input (less than 1% could indicate a problem)
+    let input_metadata = fs::metadata(original_lib)?;
+    let input_size = input_metadata.len();
+    let size_ratio = (output_size as f64) / (input_size as f64);
+
+    if size_ratio < 0.01 {
+        return Err(format!(
+            "Output file is suspiciously small ({} bytes vs {} bytes input, {}% of original). This may indicate a patching error.",
+            output_size, input_size, (size_ratio * 100.0) as u32
+        ).into());
+    }
+
+    // 3. Verify it's a valid archive by listing symbols
+    let symbols = list_symbols(static_lib)?;
+
+    if symbols.is_empty() {
+        return Err("Output library contains no symbols - patching may have failed".into());
+    }
+
+    // 4. Verify the filtering worked as expected
+    match mode {
+        FilterMode::Allowlist { prefix } => {
+            // Check that at least one symbol with the prefix exists
+            let matching_symbols: Vec<_> =
+                symbols.iter().filter(|s| s.starts_with(prefix)).collect();
+
+            if matching_symbols.is_empty() {
+                return Err(format!(
+                    "No symbols found with prefix '{}' in output library. Expected at least one public symbol with this prefix.",
+                    prefix
+                ).into());
+            }
+
+            eprintln!(
+                "  ✓ Found {} public symbols with prefix '{}'",
+                matching_symbols.len(),
+                prefix
+            );
+        }
+        FilterMode::Blocklist { remove } => {
+            // Check that blocked symbols are either gone or made local
+            // (We can't easily check if they're local vs gone, but at least they shouldn't be global)
+            let still_global: Vec<_> = symbols
+                .iter()
+                .filter(|s| remove.contains(&s.to_string()))
+                .collect();
+
+            if !still_global.is_empty() {
+                return Err(format!(
+                    "The following symbols are still global after patching: {}",
+                    still_global
+                        .iter()
+                        .take(5)
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into());
+            }
+
+            eprintln!("  ✓ Verified {} symbols are no longer global", remove.len());
+        }
+    }
+
+    eprintln!(
+        "  ✓ Output library contains {} total public symbols",
+        symbols.len()
+    );
+
+    Ok(())
+}
+
+/// Lists all public/global symbols in a static library
+///
+/// # Arguments
+///
+/// * `static_lib` - Path to the static library (e.g., `libmylib.a`, `mylib.lib`)
+///
+/// # Returns
+///
+/// A Result containing a sorted Vec of symbol names, or an error message.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use lib_patcher::list_symbols;
+/// use std::path::Path;
+///
+/// let symbols = list_symbols(Path::new("libmylib.a")).unwrap();
+/// for sym in symbols {
+///     println!("{}", sym);
+/// }
+/// ```
+pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let archive_file = fs::File::open(static_lib)?;
+    let mut archive = ar::Archive::new(archive_file);
+    let mut symbols = HashSet::new();
+
+    // Extract and read symbols from each object file
+    while let Some(Ok(mut entry)) = archive.next_entry() {
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+
+        // Parse the object file
+        let file = match File::parse(&*data) {
+            Ok(f) => f,
+            Err(_) => continue, // Skip non-object files
+        };
+
+        // Collect global/public symbols
+        for symbol in file.symbols() {
+            // Only include global/public symbols
+            if symbol.is_global() && symbol.is_definition() {
+                if let Ok(name) = symbol.name() {
+                    if !name.is_empty() {
+                        symbols.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Convert to sorted vector
+    let mut result: Vec<String> = symbols.into_iter().collect();
+    result.sort();
+    Ok(result)
 }

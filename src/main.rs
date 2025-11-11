@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use lib_patcher::{FilterMode, patch_lib};
+use lib_patcher::{FilterMode, list_symbols, patch_lib};
 use std::path::PathBuf;
 
 /// Symbol filtering tool for cross-platform static libraries
@@ -91,6 +91,17 @@ enum Commands {
         /// On Linux, this enables cross-architecture patching (requires cross-compilation tools).
         #[arg(short = 'a', long, value_name = "ARCH")]
         arch: Option<String>,
+    },
+
+    /// List all public/global symbols in a static library
+    ///
+    /// Shows all globally visible symbols that would be exposed when linking
+    /// this static library. Useful for inspecting what symbols a library exports
+    /// before and after patching.
+    ListSymbols {
+        /// Path to the static library (e.g., libmylib.a, mylib.lib)
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
     },
 }
 
@@ -203,6 +214,34 @@ fn main() {
 
             println!("✓ Successfully patched library!");
             println!("  {} symbols are now hidden.", symbols_list.len());
+        }
+
+        Commands::ListSymbols { input } => {
+            // Validate input file exists
+            if !input.exists() {
+                eprintln!("Error: Input file does not exist: {}", input.display());
+                std::process::exit(1);
+            }
+
+            println!("Listing public symbols in: {}", input.display());
+            println!();
+
+            match list_symbols(&input) {
+                Ok(symbols) => {
+                    if symbols.is_empty() {
+                        println!("No public symbols found.");
+                    } else {
+                        println!("Found {} public symbols:\n", symbols.len());
+                        for sym in symbols {
+                            println!("{}", sym);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: Failed to list symbols: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
