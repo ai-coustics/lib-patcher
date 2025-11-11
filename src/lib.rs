@@ -917,13 +917,11 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
         // Collect global/public symbols
         for symbol in file.symbols() {
             // Only include global/public symbols
-            if symbol.is_global() && symbol.is_definition() {
-                if let Ok(name) = symbol.name() {
-                    if !name.is_empty() {
+            if symbol.is_global() && symbol.is_definition()
+                && let Ok(name) = symbol.name()
+                    && !name.is_empty() {
                         symbols.insert(name.to_string());
                     }
-                }
-            }
         }
     }
 
