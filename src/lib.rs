@@ -167,37 +167,18 @@ fn patch_windows(
     let mut obj_files = Vec::new();
 
     // Extract and patch each object file
-    let mut skipped_count = 0;
-    let mut total_count = 0;
-
     while let Some(Ok(mut entry)) = archive.next_entry() {
         let mut data = Vec::new();
         entry.read_to_end(&mut data).expect("Failed to read entry");
-        total_count += 1;
 
         let patched = match patch_coff_object(&data, mode) {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to patch object file {}: {}",
-                    total_count, e
-                );
-                skipped_count += 1;
-                // If we can't patch it, include the original object file unchanged
-                data
-            }
+            Err(_) => continue, // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
         };
 
         let out_path = temp_dir.join(format!("{}.obj", obj_files.len()));
         fs::write(&out_path, patched).expect("Failed to write object");
         obj_files.push(out_path);
-    }
-
-    if skipped_count > 0 {
-        eprintln!(
-            "Warning: {} out of {} object files could not be patched (using original)",
-            skipped_count, total_count
-        );
     }
 
     // Determine which library tool to use and the machine type
