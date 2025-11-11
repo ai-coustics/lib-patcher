@@ -167,18 +167,37 @@ fn patch_windows(
     let mut obj_files = Vec::new();
 
     // Extract and patch each object file
+    let mut skipped_count = 0;
+    let mut total_count = 0;
+
     while let Some(Ok(mut entry)) = archive.next_entry() {
         let mut data = Vec::new();
         entry.read_to_end(&mut data).expect("Failed to read entry");
+        total_count += 1;
 
         let patched = match patch_coff_object(&data, mode) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to patch object file {}: {}",
+                    total_count, e
+                );
+                skipped_count += 1;
+                // If we can't patch it, include the original object file unchanged
+                data
+            }
         };
 
         let out_path = temp_dir.join(format!("{}.obj", obj_files.len()));
         fs::write(&out_path, patched).expect("Failed to write object");
         obj_files.push(out_path);
+    }
+
+    if skipped_count > 0 {
+        eprintln!(
+            "Warning: {} out of {} object files could not be patched (using original)",
+            skipped_count, total_count
+        );
     }
 
     // Determine which library tool to use and the machine type
@@ -198,11 +217,18 @@ fn patch_windows(
     let mut cmd = Command::new(&lib_cmd.tool);
 
     if lib_cmd.is_llvm {
-        // LLVM-lib syntax
-        if let Some(machine) = &lib_cmd.machine_type {
-            cmd.arg(format!("/MACHINE:{}", machine));
+        // LLVM-ar syntax (use llvm-ar instead of llvm-lib to avoid path issues)
+        // Create archive with 'rc' flags: r=insert/replace, c=create
+        cmd.arg("rc");
+        cmd.arg(&final_lib_abs);
+        cmd.current_dir(&temp_dir);
+
+        for obj in &obj_files {
+            // Use just the filename relative to temp_dir
+            if let Some(filename) = obj.file_name() {
+                cmd.arg(filename);
+            }
         }
-        cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
     } else {
         // MSVC lib.exe syntax
         cmd.arg("/nologo");
@@ -210,15 +236,13 @@ fn patch_windows(
             cmd.arg(format!("/MACHINE:{}", machine));
         }
         cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
-    }
+        cmd.current_dir(&temp_dir);
 
-    // Change to temp directory and use relative paths to avoid storing absolute paths in archive
-    cmd.current_dir(&temp_dir);
-
-    for obj in &obj_files {
-        // Use just the filename relative to temp_dir
-        if let Some(filename) = obj.file_name() {
-            cmd.arg(filename);
+        for obj in &obj_files {
+            // Use just the filename relative to temp_dir
+            if let Some(filename) = obj.file_name() {
+                cmd.arg(filename);
+            }
         }
     }
 
@@ -272,22 +296,22 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     let is_cross = target_arch_str != host_arch;
 
     if is_cross {
-        // For cross-architecture, prefer llvm-lib as it's more flexible
-        if Command::new("llvm-lib").arg("/?").output().is_ok() {
+        // For cross-architecture, prefer llvm-ar as it's more reliable than llvm-lib
+        if Command::new("llvm-ar").arg("--version").output().is_ok() {
             eprintln!(
-                "Using llvm-lib for cross-architecture Windows build ({} -> {})",
+                "Using llvm-ar for cross-architecture Windows build ({} -> {})",
                 host_arch, target_arch_str
             );
             return WindowsLibTool {
-                tool: "llvm-lib".to_string(),
+                tool: "llvm-ar".to_string(),
                 machine_type,
                 is_llvm: true,
             };
         } else if Command::new("lld-link").arg("--version").output().is_ok() {
-            // Try to find llvm-lib in the same directory as lld-link
-            eprintln!("llvm-lib not found, but lld-link exists. Using llvm-lib anyway.");
+            // Try to find llvm-ar in the same directory as lld-link
+            eprintln!("llvm-ar not found, but lld-link exists. Using llvm-ar anyway.");
             return WindowsLibTool {
-                tool: "llvm-lib".to_string(),
+                tool: "llvm-ar".to_string(),
                 machine_type,
                 is_llvm: true,
             };
