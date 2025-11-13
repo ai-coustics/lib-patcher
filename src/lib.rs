@@ -447,7 +447,7 @@ fn patch_coff_symbol_table(
 
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
-        let is_comdat = comdat_symbols.contains(&i);
+        // let is_comdat = comdat_symbols.contains(&i);
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
@@ -461,7 +461,7 @@ fn patch_coff_symbol_table(
             }),
         };
 
-        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+        let keep_global = is_special || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -569,7 +569,6 @@ fn patch_coff_bigobj_symbol_table(
         };
 
         let is_special = name.starts_with('@');
-        let is_comdat = comdat_symbols.contains(&i);
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
@@ -583,7 +582,7 @@ fn patch_coff_bigobj_symbol_table(
             }),
         };
 
-        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+        let keep_global = is_special || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
@@ -693,7 +692,7 @@ fn patch_coff_object_full_rewrite(
 
         // COMDAT symbols MUST stay global for linker deduplication to work
         // UNLESS they're explicitly in the blocklist (for Rust stdlib symbols)
-        let is_comdat_symbol = comdat_symbols.contains(&orig_idx);
+        // let is_comdat_symbol = comdat_symbols.contains(&orig_idx);
 
         // Check if symbol matches filter before considering COMDAT
         let matches_filter = match mode {
@@ -714,9 +713,7 @@ fn patch_coff_object_full_rewrite(
         };
 
         // Determine if this symbol should be kept as global
-        let keep_global = is_special_symbol
-            || (is_comdat_symbol && matches_filter) // Keep COMDAT global only if not filtered
-            || matches_filter;
+        let keep_global = is_special_symbol || matches_filter;
 
         let section = match symbol.section() {
             object::SymbolSection::Section(idx) => section_map
