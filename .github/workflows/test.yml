@@ -68,10 +68,9 @@ jobs:
       - name: Patch mylib for C test (Windows)
         if: runner.os == 'Windows'
         run: |
-          .\target\release\lib-patcher.exe allowlist `
+          .\target\release\lib-patcher.exe blocklist `
             --input examples\mylib\target\release\mylib.lib `
             --output examples\mylib\target\release\mylib_patched.lib `
-            --prefix mylib_
         shell: pwsh
 
       - name: Build C test (Linux/macOS)

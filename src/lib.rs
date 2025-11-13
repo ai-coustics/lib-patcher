@@ -50,7 +50,7 @@ impl FilterMode {
                 "__rust_alloc_error_handler".to_string(),
                 // Hide specific problematic mangled Rust stdlib symbols
                 // Only hide panicking and eh symbols, not all std symbols
-                "_ZN3std9panicking*".to_string(),  // std::panicking::
+                "_ZN3std9panicking*".to_string(), // std::panicking::
                 "_ZN4core9panicking*".to_string(), // core::panicking::
             ],
         }
@@ -244,7 +244,11 @@ fn patch_windows(
     });
 
     if !status.success() {
-        eprintln!("ERROR: {} failed with exit code: {:?}", lib_cmd.tool, status.code());
+        eprintln!(
+            "ERROR: {} failed with exit code: {:?}",
+            lib_cmd.tool,
+            status.code()
+        );
         eprintln!("Temp directory kept for debugging: {}", temp_dir.display());
         panic!("{} failed", lib_cmd.tool);
     }
@@ -341,9 +345,9 @@ fn patch_coff_symbol_table(
     data: &[u8],
     mode: &FilterMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use object::LittleEndian as LE;
     use object::pe;
     use object::read::coff::CoffHeader;
-    use object::LittleEndian as LE;
 
     // Parse COFF header
     let mut data = data.to_vec();
@@ -367,13 +371,22 @@ fn patch_coff_symbol_table(
         return Ok(data);
     }
 
-    eprintln!("DEBUG: symbol_table_offset={}, symbol_count={}, data.len()={}",
-              symbol_table_offset, symbol_count, data.len());
+    eprintln!(
+        "DEBUG: symbol_table_offset={}, symbol_count={}, data.len()={}",
+        symbol_table_offset,
+        symbol_count,
+        data.len()
+    );
 
     // Validate bounds
     let symbol_table_end = symbol_table_offset + (symbol_count * 18);
     if symbol_table_end > data.len() {
-        return Err(format!("Symbol table extends beyond file: {} > {}", symbol_table_end, data.len()).into());
+        return Err(format!(
+            "Symbol table extends beyond file: {} > {}",
+            symbol_table_end,
+            data.len()
+        )
+        .into());
     }
 
     // Get string table offset (right after symbol table)
@@ -399,7 +412,6 @@ fn patch_coff_symbol_table(
 
         // Read symbol entry (we need to re-borrow to avoid holding reference)
         let storage_class = data[symbol_offset + 16];
-        let aux_count = data[symbol_offset + 17] as usize;
 
         // Check if this is a global symbol (storage class 2 = IMAGE_SYM_CLASS_EXTERNAL)
         if storage_class != 2 {
@@ -414,10 +426,17 @@ fn patch_coff_symbol_table(
         let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
             // Long name - read from string table
             let string_offset = u32::from_le_bytes([
-                symbol_entry[4], symbol_entry[5], symbol_entry[6], symbol_entry[7]
+                symbol_entry[4],
+                symbol_entry[5],
+                symbol_entry[6],
+                symbol_entry[7],
             ]) as usize;
             if string_table_offset + string_offset >= data.len() {
-                return Err(format!("String table offset out of bounds: {}", string_table_offset + string_offset).into());
+                return Err(format!(
+                    "String table offset out of bounds: {}",
+                    string_table_offset + string_offset
+                )
+                .into());
             }
             read_coff_string(&data, string_table_offset + string_offset)?
         } else {
@@ -432,16 +451,14 @@ fn patch_coff_symbol_table(
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove } => {
-                !remove.iter().any(|pattern| {
-                    if pattern.ends_with('*') {
-                        let prefix = &pattern[..pattern.len() - 1];
-                        name.starts_with(prefix)
-                    } else {
-                        &name == pattern
-                    }
-                })
-            }
+            FilterMode::Blocklist { remove } => !remove.iter().any(|pattern| {
+                if pattern.ends_with('*') {
+                    let prefix = &pattern[..pattern.len() - 1];
+                    name.starts_with(prefix)
+                } else {
+                    &name == pattern
+                }
+            }),
         };
 
         let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
@@ -465,9 +482,6 @@ fn patch_coff_bigobj_symbol_table(
     mut data: Vec<u8>,
     mode: &FilterMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use object::LittleEndian as LE;
-    use object::pod::bytes_of;
-
     // Big obj format has a 56-byte header
     // Offset 48: pointer to symbol table (u32)
     // Offset 52: number of symbols (u32)
@@ -482,13 +496,22 @@ fn patch_coff_bigobj_symbol_table(
         return Ok(data);
     }
 
-    eprintln!("DEBUG BIGOBJ: symbol_table_offset={}, symbol_count={}, data.len()={}",
-              symbol_table_offset, symbol_count, data.len());
+    eprintln!(
+        "DEBUG BIGOBJ: symbol_table_offset={}, symbol_count={}, data.len()={}",
+        symbol_table_offset,
+        symbol_count,
+        data.len()
+    );
 
     // Big obj format uses 20-byte symbol entries (instead of 18)
     let symbol_table_end = symbol_table_offset + (symbol_count * 20);
     if symbol_table_end > data.len() {
-        return Err(format!("Symbol table extends beyond file: {} > {}", symbol_table_end, data.len()).into());
+        return Err(format!(
+            "Symbol table extends beyond file: {} > {}",
+            symbol_table_end,
+            data.len()
+        )
+        .into());
     }
 
     let string_table_offset = symbol_table_end;
@@ -527,10 +550,17 @@ fn patch_coff_bigobj_symbol_table(
         let symbol_entry = &data[symbol_offset..symbol_offset + 20];
         let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
             let string_offset = u32::from_le_bytes([
-                symbol_entry[4], symbol_entry[5], symbol_entry[6], symbol_entry[7]
+                symbol_entry[4],
+                symbol_entry[5],
+                symbol_entry[6],
+                symbol_entry[7],
             ]) as usize;
             if string_table_offset + string_offset >= data.len() {
-                return Err(format!("String table offset out of bounds: {}", string_table_offset + string_offset).into());
+                return Err(format!(
+                    "String table offset out of bounds: {}",
+                    string_table_offset + string_offset
+                )
+                .into());
             }
             read_coff_string(&data, string_table_offset + string_offset)?
         } else {
@@ -543,16 +573,14 @@ fn patch_coff_bigobj_symbol_table(
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove} => {
-                !remove.iter().any(|pattern| {
-                    if pattern.ends_with('*') {
-                        let prefix = &pattern[..pattern.len() - 1];
-                        name.starts_with(prefix)
-                    } else {
-                        &name == pattern
-                    }
-                })
-            }
+            FilterMode::Blocklist { remove } => !remove.iter().any(|pattern| {
+                if pattern.ends_with('*') {
+                    let prefix = &pattern[..pattern.len() - 1];
+                    name.starts_with(prefix)
+                } else {
+                    &name == pattern
+                }
+            }),
         };
 
         let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
@@ -569,7 +597,10 @@ fn patch_coff_bigobj_symbol_table(
 }
 
 fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::error::Error>> {
-    let end = data[offset..].iter().position(|&b| b == 0).unwrap_or(data.len() - offset);
+    let end = data[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(data.len() - offset);
     Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
 }
 
@@ -692,19 +723,25 @@ fn patch_coff_object_full_rewrite(
                 .get(&idx.0)
                 .map(|&s| SymbolSection::Section(s))
                 .unwrap_or_else(|| {
-                    eprintln!("Warning: Symbol '{}' references missing section {}",  name, idx.0);
+                    eprintln!(
+                        "Warning: Symbol '{}' references missing section {}",
+                        name, idx.0
+                    );
                     SymbolSection::Undefined
                 }),
             object::SymbolSection::Undefined => SymbolSection::Undefined,
             object::SymbolSection::Absolute => {
                 // Don't create absolute symbols for functions - they can't be used as relocation targets
                 if symbol.kind() == SymbolKind::Text || symbol.kind() == SymbolKind::Unknown {
-                    eprintln!("Warning: Converting absolute symbol '{}' to undefined to avoid link errors", name);
+                    eprintln!(
+                        "Warning: Converting absolute symbol '{}' to undefined to avoid link errors",
+                        name
+                    );
                     SymbolSection::Undefined
                 } else {
                     SymbolSection::Absolute
                 }
-            },
+            }
             object::SymbolSection::Common => SymbolSection::Common,
             _ => SymbolSection::Undefined,
         };
@@ -738,7 +775,10 @@ fn patch_coff_object_full_rewrite(
     for comdat in file.comdats() {
         let symbol_index = comdat.symbol();
         let Some(&symbol_id) = symbol_map.get(&symbol_index.0) else {
-            eprintln!("Warning: COMDAT symbol index {} not found in symbol_map", symbol_index.0);
+            eprintln!(
+                "Warning: COMDAT symbol index {} not found in symbol_map",
+                symbol_index.0
+            );
             continue;
         };
 

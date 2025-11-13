@@ -13,20 +13,14 @@ fn main() {
     println!("cargo:warning=Building for target: {}", target);
     println!("cargo:warning=Target architecture: {}", target_arch);
 
-    // Determine the target-specific subdirectory
-    let target_dir = if target.contains("aarch64") || target.contains("arm64") {
-        "aarch64-pc-windows-msvc"
-    } else {
-        "release"
-    };
-
     // Path to the original mylib static library (platform-specific naming)
-    let (mylib_path, patched_lib, target_arch_param) = if cfg!(target_os = "windows") {
+    let (mylib_path, patched_lib, target_arch_param, build_command) = if cfg!(target_os = "windows")
+    {
         let lib_path = if target.contains("aarch64") || target.contains("arm64") {
             manifest_dir
                 .parent()
                 .unwrap()
-                .join(format!("mylib/target/{}/release/mylib.lib", target_dir))
+                .join(format!("mylib/target/{}/release/mylib.lib", target))
         } else {
             manifest_dir
                 .parent()
@@ -34,13 +28,20 @@ fn main() {
                 .join("mylib/target/release/mylib.lib")
         };
 
+        let cmd = if target.contains("aarch64") || target.contains("arm64") {
+            format!(" --target {}", target)
+        } else {
+            String::new()
+        };
+
         (
             lib_path,
             out_dir.join("mylib_patched.lib"),
             Some(target_arch.as_str()),
+            cmd,
         )
     } else {
-        let lib_path = if target.contains("aarch64") {
+        let lib_path = if target.contains("aarch64") || target.contains("arm64") {
             manifest_dir
                 .parent()
                 .unwrap()
@@ -52,22 +53,24 @@ fn main() {
                 .join("mylib/target/release/libmylib.a")
         };
 
+        let cmd = if target.contains("aarch64") || target.contains("arm64") {
+            format!(" --target {}", target)
+        } else {
+            String::new()
+        };
+
         (
             lib_path,
             out_dir.join("libmylib_patched.a"),
             Some(target_arch.as_str()),
+            cmd,
         )
     };
 
     if !mylib_path.exists() {
         panic!(
             "mylib not found at {:?}. Run 'cargo build --release{}' in the mylib directory first.",
-            mylib_path,
-            if target.contains("aarch64") {
-                " --target aarch64-pc-windows-msvc"
-            } else {
-                ""
-            }
+            mylib_path, build_command
         );
     }
 
