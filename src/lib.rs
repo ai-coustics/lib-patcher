@@ -4,11 +4,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use object::ObjectComdat;
 use object::read::File;
-use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+use object::write::{Comdat, Object as WriteObject, Relocation, Symbol, SymbolSection};
 use object::{
-    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolFlags,
-    SymbolKind,
+    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SectionFlags,
+    SectionKind, SymbolFlags, SymbolKind,
 };
 
 /// Filtering strategy for symbol visibility
@@ -34,6 +35,7 @@ impl FilterMode {
     /// - `__rust_no_alloc_shim_is_unstable` - Allocation shim marker
     /// - `__rust_alloc`, `__rust_dealloc`, `__rust_realloc` - Allocator functions
     /// - `__rust_alloc_zeroed` - Zero-initialized allocation
+    /// - Rust stdlib symbols that may appear in COMDATs
     ///
     /// These symbols commonly conflict when linking multiple Rust staticlibs.
     pub fn default_blocklist() -> Self {
@@ -46,6 +48,10 @@ impl FilterMode {
                 "__rust_realloc".to_string(),
                 "__rust_alloc_zeroed".to_string(),
                 "__rust_alloc_error_handler".to_string(),
+                // Hide specific problematic mangled Rust stdlib symbols
+                // Only hide panicking and eh symbols, not all std symbols
+                "_ZN3std9panicking*".to_string(),  // std::panicking::
+                "_ZN4core9panicking*".to_string(), // core::panicking::
             ],
         }
     }
@@ -173,7 +179,10 @@ fn patch_windows(
 
         let patched = match patch_coff_object(&data, mode) {
             Ok(p) => p,
-            Err(_) => continue, // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
+            Err(e) => {
+                eprintln!("Warning: Skipping object ({})", e);
+                continue; // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
+            }
         };
 
         let out_path = temp_dir.join(format!("{}.obj", obj_files.len()));
@@ -233,9 +242,16 @@ fn patch_windows(
             lib_cmd.tool
         )
     });
-    assert!(status.success(), "{} failed", lib_cmd.tool);
 
-    fs::remove_dir_all(&temp_dir).ok();
+    if !status.success() {
+        eprintln!("ERROR: {} failed with exit code: {:?}", lib_cmd.tool, status.code());
+        eprintln!("Temp directory kept for debugging: {}", temp_dir.display());
+        panic!("{} failed", lib_cmd.tool);
+    }
+
+    // Keep temp dir for debugging
+    // fs::remove_dir_all(&temp_dir).ok();
+    eprintln!("Temp directory: {}", temp_dir.display());
 }
 
 struct WindowsLibTool {
@@ -316,6 +332,253 @@ fn patch_coff_object(
     data: &[u8],
     mode: &FilterMode,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // For Windows COFF, we patch the symbol table directly instead of rewriting
+    // the entire object to preserve weak symbol auxiliary data and other COFF-specific info
+    patch_coff_symbol_table(data, mode)
+}
+
+fn patch_coff_symbol_table(
+    data: &[u8],
+    mode: &FilterMode,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use object::pe;
+    use object::read::coff::CoffHeader;
+    use object::LittleEndian as LE;
+
+    // Parse COFF header
+    let mut data = data.to_vec();
+
+    // Check if this is big obj format by looking at the signature
+    // Big obj format starts with: 00 00 FF FF (sig1), then 01 02 (sig2) for ANON_OBJECT_HEADER_BIGOBJ
+    let is_bigobj = data.len() >= 4 && data[0..2] == [0x00, 0x00] && data[2..4] == [0xFF, 0xFF];
+
+    if is_bigobj {
+        return patch_coff_bigobj_symbol_table(data, mode);
+    }
+
+    let mut offset = 0u64;
+    let header = pe::ImageFileHeader::parse(&data[..], &mut offset)?;
+
+    let symbol_table_offset = header.pointer_to_symbol_table.get(LE) as usize;
+    let symbol_count = header.number_of_symbols.get(LE) as usize;
+
+    if symbol_table_offset == 0 || symbol_count == 0 {
+        // No symbol table, return unchanged
+        return Ok(data);
+    }
+
+    eprintln!("DEBUG: symbol_table_offset={}, symbol_count={}, data.len()={}",
+              symbol_table_offset, symbol_count, data.len());
+
+    // Validate bounds
+    let symbol_table_end = symbol_table_offset + (symbol_count * 18);
+    if symbol_table_end > data.len() {
+        return Err(format!("Symbol table extends beyond file: {} > {}", symbol_table_end, data.len()).into());
+    }
+
+    // Get string table offset (right after symbol table)
+    let string_table_offset = symbol_table_end;
+
+    // Collect COMDAT symbols that should stay global
+    let file = File::parse(data.as_slice())?;
+    let mut comdat_symbols = HashSet::new();
+    for comdat in file.comdats() {
+        comdat_symbols.insert(comdat.symbol().0);
+    }
+
+    let mut modified_count = 0;
+
+    // Patch each symbol entry
+    for i in 0..symbol_count {
+        let symbol_offset = symbol_table_offset + (i * 18);
+
+        // Bounds check
+        if symbol_offset + 18 > data.len() {
+            return Err(format!("Symbol {} extends beyond file", i).into());
+        }
+
+        // Read symbol entry (we need to re-borrow to avoid holding reference)
+        let storage_class = data[symbol_offset + 16];
+        let aux_count = data[symbol_offset + 17] as usize;
+
+        // Check if this is a global symbol (storage class 2 = IMAGE_SYM_CLASS_EXTERNAL)
+        if storage_class != 2 {
+            // Skip this symbol and its auxiliary entries
+            continue;
+        }
+
+        // Get symbol name
+        let symbol_entry = &data[symbol_offset..symbol_offset + 18];
+
+        // Get symbol name (first 8 bytes)
+        let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
+            // Long name - read from string table
+            let string_offset = u32::from_le_bytes([
+                symbol_entry[4], symbol_entry[5], symbol_entry[6], symbol_entry[7]
+            ]) as usize;
+            if string_table_offset + string_offset >= data.len() {
+                return Err(format!("String table offset out of bounds: {}", string_table_offset + string_offset).into());
+            }
+            read_coff_string(&data, string_table_offset + string_offset)?
+        } else {
+            // Short name - inline in symbol table
+            let end = symbol_entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
+            String::from_utf8_lossy(&symbol_entry[0..end]).to_string()
+        };
+
+        // Check if symbol should remain global
+        let is_special = name.starts_with('@');
+        let is_comdat = comdat_symbols.contains(&i);
+
+        let matches_filter = match mode {
+            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
+            FilterMode::Blocklist { remove } => {
+                !remove.iter().any(|pattern| {
+                    if pattern.ends_with('*') {
+                        let prefix = &pattern[..pattern.len() - 1];
+                        name.starts_with(prefix)
+                    } else {
+                        &name == pattern
+                    }
+                })
+            }
+        };
+
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+
+        if !keep_global {
+            // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
+            data[symbol_offset + 16] = 3;
+            modified_count += 1;
+            eprintln!("  Hiding symbol: {}", name);
+        }
+
+        // Note: We iterate through all symbol table entries. Auxiliary symbol entries
+        // will have storage_class != 2, so they'll be skipped above
+    }
+
+    eprintln!("Modified {} symbols in object", modified_count);
+    Ok(data)
+}
+
+fn patch_coff_bigobj_symbol_table(
+    mut data: Vec<u8>,
+    mode: &FilterMode,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use object::LittleEndian as LE;
+    use object::pod::bytes_of;
+
+    // Big obj format has a 56-byte header
+    // Offset 48: pointer to symbol table (u32)
+    // Offset 52: number of symbols (u32)
+    if data.len() < 56 {
+        return Err("File too small for big obj format".into());
+    }
+
+    let symbol_table_offset = u32::from_le_bytes([data[48], data[49], data[50], data[51]]) as usize;
+    let symbol_count = u32::from_le_bytes([data[52], data[53], data[54], data[55]]) as usize;
+
+    if symbol_table_offset == 0 || symbol_count == 0 {
+        return Ok(data);
+    }
+
+    eprintln!("DEBUG BIGOBJ: symbol_table_offset={}, symbol_count={}, data.len()={}",
+              symbol_table_offset, symbol_count, data.len());
+
+    // Big obj format uses 20-byte symbol entries (instead of 18)
+    let symbol_table_end = symbol_table_offset + (symbol_count * 20);
+    if symbol_table_end > data.len() {
+        return Err(format!("Symbol table extends beyond file: {} > {}", symbol_table_end, data.len()).into());
+    }
+
+    let string_table_offset = symbol_table_end;
+
+    // Collect COMDAT symbols
+    let file = File::parse(data.as_slice())?;
+    let mut comdat_symbols = HashSet::new();
+    for comdat in file.comdats() {
+        comdat_symbols.insert(comdat.symbol().0);
+    }
+
+    let mut modified_count = 0;
+
+    for i in 0..symbol_count {
+        let symbol_offset = symbol_table_offset + (i * 20);
+
+        if symbol_offset + 20 > data.len() {
+            return Err(format!("Symbol {} extends beyond file", i).into());
+        }
+
+        // In big obj format:
+        // Bytes 0-7: Name (8 bytes)
+        // Bytes 8-11: Value (4 bytes)
+        // Bytes 12-15: SectionNumber (4 bytes, not 2!)
+        // Bytes 16-17: Type (2 bytes)
+        // Byte 18: StorageClass
+        // Byte 19: NumberOfAuxSymbols
+
+        let storage_class = data[symbol_offset + 18];
+
+        if storage_class != 2 {
+            continue;
+        }
+
+        // Get symbol name
+        let symbol_entry = &data[symbol_offset..symbol_offset + 20];
+        let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
+            let string_offset = u32::from_le_bytes([
+                symbol_entry[4], symbol_entry[5], symbol_entry[6], symbol_entry[7]
+            ]) as usize;
+            if string_table_offset + string_offset >= data.len() {
+                return Err(format!("String table offset out of bounds: {}", string_table_offset + string_offset).into());
+            }
+            read_coff_string(&data, string_table_offset + string_offset)?
+        } else {
+            let end = symbol_entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
+            String::from_utf8_lossy(&symbol_entry[0..end]).to_string()
+        };
+
+        let is_special = name.starts_with('@');
+        let is_comdat = comdat_symbols.contains(&i);
+
+        let matches_filter = match mode {
+            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
+            FilterMode::Blocklist { remove} => {
+                !remove.iter().any(|pattern| {
+                    if pattern.ends_with('*') {
+                        let prefix = &pattern[..pattern.len() - 1];
+                        name.starts_with(prefix)
+                    } else {
+                        &name == pattern
+                    }
+                })
+            }
+        };
+
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+
+        if !keep_global {
+            data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
+            modified_count += 1;
+            eprintln!("  Hiding symbol (bigobj): {}", name);
+        }
+    }
+
+    eprintln!("Modified {} symbols in bigobj", modified_count);
+    Ok(data)
+}
+
+fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::error::Error>> {
+    let end = data[offset..].iter().position(|&b| b == 0).unwrap_or(data.len() - offset);
+    Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
+}
+
+// Keep the old implementation as a fallback (currently unused)
+#[allow(dead_code)]
+fn patch_coff_object_full_rewrite(
+    data: &[u8],
+    mode: &FilterMode,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use std::collections::HashMap;
 
     let file = File::parse(data)?;
@@ -324,6 +587,12 @@ fn patch_coff_object(
     let mut section_map = HashMap::new();
     let mut symbol_map = HashMap::new();
     let mut section_sym_map = HashMap::new();
+
+    // Collect COMDAT symbol indices - these must stay global for linker deduplication
+    let mut comdat_symbols = HashSet::new();
+    for comdat in file.comdats() {
+        comdat_symbols.insert(comdat.symbol().0);
+    }
 
     // Copy sections and create section symbols
     for section in file.sections() {
@@ -336,13 +605,19 @@ fn patch_coff_object(
         let id = writer.add_section(Vec::new(), name.clone(), kind);
 
         let align = section.align();
-        if kind != SectionKind::UninitializedData
-            && let Ok(data) = section.uncompressed_data()
-        {
-            let data_bytes = data.into_owned();
-            if !data_bytes.is_empty() {
-                writer.section_mut(id).set_data(data_bytes, align);
+        if kind != SectionKind::UninitializedData {
+            if let Ok(data) = section.uncompressed_data() {
+                let data_bytes = data.into_owned();
+                writer.section_mut(id).set_data(data_bytes, align.max(1));
             }
+        } else {
+            let size = section.size();
+            let section_mut = writer.section_mut(id);
+            section_mut.append_bss(size, align.max(1));
+        }
+
+        if let SectionFlags::Coff { characteristics } = section.flags() {
+            writer.section_mut(id).flags = SectionFlags::Coff { characteristics };
         }
 
         // Create section symbol
@@ -385,20 +660,51 @@ fn patch_coff_object(
         // Always keep special MSVC symbols (like @feat.00)
         let is_special_symbol = name.starts_with('@');
 
+        // COMDAT symbols MUST stay global for linker deduplication to work
+        // UNLESS they're explicitly in the blocklist (for Rust stdlib symbols)
+        let is_comdat_symbol = comdat_symbols.contains(&orig_idx);
+
+        // Check if symbol matches filter before considering COMDAT
+        let matches_filter = match mode {
+            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
+            FilterMode::Blocklist { remove } => {
+                // Check if symbol is in blocklist (exact match or starts with pattern)
+                !remove.iter().any(|pattern| {
+                    if pattern.ends_with('*') {
+                        // Wildcard pattern - check prefix
+                        let prefix = &pattern[..pattern.len() - 1];
+                        name.starts_with(prefix)
+                    } else {
+                        // Exact match
+                        &name == pattern
+                    }
+                })
+            }
+        };
+
         // Determine if this symbol should be kept as global
         let keep_global = is_special_symbol
-            || match mode {
-                FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-                FilterMode::Blocklist { remove } => !remove.contains(&name),
-            };
+            || (is_comdat_symbol && matches_filter) // Keep COMDAT global only if not filtered
+            || matches_filter;
 
         let section = match symbol.section() {
             object::SymbolSection::Section(idx) => section_map
                 .get(&idx.0)
                 .map(|&s| SymbolSection::Section(s))
-                .unwrap_or(SymbolSection::Undefined),
+                .unwrap_or_else(|| {
+                    eprintln!("Warning: Symbol '{}' references missing section {}",  name, idx.0);
+                    SymbolSection::Undefined
+                }),
             object::SymbolSection::Undefined => SymbolSection::Undefined,
-            object::SymbolSection::Absolute => SymbolSection::Absolute,
+            object::SymbolSection::Absolute => {
+                // Don't create absolute symbols for functions - they can't be used as relocation targets
+                if symbol.kind() == SymbolKind::Text || symbol.kind() == SymbolKind::Unknown {
+                    eprintln!("Warning: Converting absolute symbol '{}' to undefined to avoid link errors", name);
+                    SymbolSection::Undefined
+                } else {
+                    SymbolSection::Absolute
+                }
+            },
             object::SymbolSection::Common => SymbolSection::Common,
             _ => SymbolSection::Undefined,
         };
@@ -425,6 +731,38 @@ fn patch_coff_object(
 
         let id = writer.add_symbol(wsym);
         symbol_map.insert(orig_idx, id);
+    }
+
+    // Re-create COMDAT groups to preserve section selection on Windows.
+    let mut comdat_count = 0;
+    for comdat in file.comdats() {
+        let symbol_index = comdat.symbol();
+        let Some(&symbol_id) = symbol_map.get(&symbol_index.0) else {
+            eprintln!("Warning: COMDAT symbol index {} not found in symbol_map", symbol_index.0);
+            continue;
+        };
+
+        let mut sections = Vec::new();
+        for section_index in comdat.sections() {
+            if let Some(&section_id) = section_map.get(&section_index.0) {
+                sections.push(section_id);
+            }
+        }
+
+        if sections.is_empty() {
+            continue;
+        }
+
+        let kind = comdat.kind();
+        writer.add_comdat(Comdat {
+            kind,
+            symbol: symbol_id,
+            sections,
+        });
+        comdat_count += 1;
+    }
+    if comdat_count > 0 {
+        eprintln!("Created {} COMDAT groups", comdat_count);
     }
 
     // Copy relocations
@@ -934,11 +1272,13 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
         // Collect global/public symbols
         for symbol in file.symbols() {
             // Only include global/public symbols
-            if symbol.is_global() && symbol.is_definition()
+            if symbol.is_global()
+                && symbol.is_definition()
                 && let Ok(name) = symbol.name()
-                    && !name.is_empty() {
-                        symbols.insert(name.to_string());
-                    }
+                && !name.is_empty()
+            {
+                symbols.insert(name.to_string());
+            }
         }
     }
 
