@@ -10,7 +10,6 @@ A Rust static library with multiple dependencies to generate many symbols:
 - Uses `serde` and `serde_json` for serialization
 - Uses standard library features (HashMap, Vec, String formatting)
 - Exports C-compatible functions with `testlib_` prefix
-- Contains an unprefixed function (`unpatched_function`) to test blocklist mode
 
 ### 2. `c-consumer/` - C Integration Test
 A C program that links against the patched static library:
@@ -23,7 +22,7 @@ A Rust program built with a **different Rust version** (beta vs stable):
 - Tests that the patched library doesn't conflict with the consumer's stdlib
 - Uses its own versions of rand, serde, etc.
 - Verifies no symbol conflicts occur after patching
-- This is the critical test for the blocklist mode functionality
+- This is the critical test for the symbol hiding functionality
 
 ## Running Tests
 
@@ -45,7 +44,7 @@ cd tests/testlib
 cargo build --release
 
 # 3. Patch the library
-./target/release/lib-patcher blocklist \
+./target/release/lib-patcher \
   --input tests/testlib/target/release/libtestlib.a \
   --output tests/testlib/target/release/libtestlib_patched.a
 
@@ -71,7 +70,7 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 ## What Gets Tested
 
-1. **Symbol Patching**: The library is patched in blocklist mode, hiding Rust stdlib symbols
+1. **Symbol Patching**: The library is patched to hide Rust stdlib symbols
 2. **C FFI**: C code can successfully link and call the patched library
 3. **Cross-Version Rust**: A Rust program with different stdlib/dependency versions can link without conflicts
 4. **Platform Coverage**: Tests run on Linux, macOS, and Windows

@@ -50,7 +50,7 @@ jobs:
       - name: Patch testlib (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          ./target/release/lib-patcher blocklist \
+          ./target/release/lib-patcher \
             --input tests/testlib/target/release/libtestlib.a \
             --output tests/testlib/target/release/libtestlib_patched.a
         shell: bash
@@ -58,7 +58,7 @@ jobs:
       - name: Patch testlib (Windows)
         if: runner.os == 'Windows'
         run: |
-          .\target\release\lib-patcher.exe blocklist `
+          .\target\release\lib-patcher.exe `
             --input tests\testlib\target\release\testlib.lib `
             --output tests\testlib\target\release\testlib_patched.lib
         shell: pwsh
