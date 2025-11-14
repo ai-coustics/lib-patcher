@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // External functions from the patched testlib (built with different Rust version)
-extern "C" {
+unsafe extern "C" {
     fn testlib_add(a: i32, b: i32) -> i32;
     fn testlib_multiply(a: i32, b: i32) -> i32;
     fn testlib_random_number(max: i32) -> i32;

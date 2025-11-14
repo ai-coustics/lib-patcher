@@ -11,20 +11,20 @@ struct TestData {
 }
 
 /// Add two numbers (exported C API)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_add(a: i32, b: i32) -> i32 {
     a + b
 }
 
 /// Multiply two numbers (exported C API)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_multiply(a: i32, b: i32) -> i32 {
     a * b
 }
 
 /// Generate a random number using rand crate (exported C API)
 /// This ensures rand symbols are included in the library
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_random_number(max: i32) -> i32 {
     if max <= 0 {
         return 0;
@@ -36,7 +36,7 @@ pub extern "C" fn testlib_random_number(max: i32) -> i32 {
 /// Process JSON data using serde (exported C API)
 /// Returns 1 on success, 0 on failure
 /// This ensures serde/serde_json symbols are included
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_process_json() -> i32 {
     let data = TestData {
         name: "test".to_string(),
@@ -63,7 +63,7 @@ pub extern "C" fn testlib_process_json() -> i32 {
 }
 
 /// Use HashMap from std to ensure std symbols are included
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_use_hashmap() -> i32 {
     let mut map = HashMap::new();
     map.insert("key1", 10);
@@ -75,14 +75,14 @@ pub extern "C" fn testlib_use_hashmap() -> i32 {
 }
 
 /// Format a string using std::fmt
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_format_string() -> i32 {
     let formatted = format!("Hello from Rust! Number: {}", 42);
     if formatted.contains("42") { 1 } else { 0 }
 }
 
 /// Use Vec operations to generate more std symbols
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_vec_operations() -> i32 {
     let mut vec = Vec::new();
     for i in 0..100 {
@@ -99,14 +99,14 @@ fn internal_helper() -> i32 {
 }
 
 /// Get a magic number (exported C API)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn testlib_get_magic() -> i32 {
     internal_helper()
 }
 
 /// This function doesn't have the testlib_ prefix
 /// After patching, this should be hidden (made local)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn unpatched_function() -> i32 {
     999
 }
