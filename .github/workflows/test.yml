@@ -75,13 +75,22 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd tests\c-consumer
-          cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib
+          cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib
           .\testlib-test.exe
         shell: cmd
 
-      - name: Build and run Rust test (different version)
+      - name: Build and run Rust test (different version) (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           cd tests/rust-consumer
           cargo +beta build --release
           cargo +beta run --release
         shell: bash
+
+      - name: Build and run Rust test (different version) (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd tests/rust-consumer
+          cargo +beta build --release
+          cargo +beta run --release
+        shell: pwsh
