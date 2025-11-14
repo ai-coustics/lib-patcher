@@ -6,62 +6,39 @@ use std::process::Command;
 
 use object::ObjectComdat;
 use object::read::File;
-use object::write::{Comdat, Object as WriteObject, Relocation, Symbol, SymbolSection};
-use object::{
-    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SectionFlags,
-    SectionKind, SymbolFlags, SymbolKind,
-};
+use object::{Object as ObjectTrait, ObjectSymbol};
 
-/// Filtering strategy for symbol visibility
-#[derive(Debug, Clone)]
-pub enum FilterMode {
-    /// Keep ONLY symbols matching the prefix. Hide everything else.
-    ///
-    /// Use this when you control the library and want maximum safety.
-    /// All public functions MUST start with your prefix.
-    Allowlist { prefix: String },
-
-    /// Remove ONLY the listed symbols. Keep everything else.
-    ///
-    /// Use this for third-party libraries where you can't change function names.
-    Blocklist { remove: Vec<String> },
+/// Default blocklist of common problematic Rust stdlib symbols
+///
+/// Includes:
+/// - `rust_eh_personality` - Exception handling (main conflict source)
+/// - `__rust_no_alloc_shim_is_unstable` - Allocation shim marker
+/// - `__rust_alloc`, `__rust_dealloc`, `__rust_realloc` - Allocator functions
+/// - `__rust_alloc_zeroed` - Zero-initialized allocation
+/// - Rust stdlib symbols that may appear in COMDATs
+///
+/// These symbols commonly conflict when linking multiple Rust staticlibs.
+pub fn default_symbol_blocklist() -> Vec<String> {
+    vec![
+        // Core Rust runtime/allocator symbols that commonly conflict
+        "rust_eh_personality".to_string(),
+        "__rust_no_alloc_shim_is_unstable".to_string(),
+        "__rust_alloc".to_string(),
+        "__rust_dealloc".to_string(),
+        "__rust_realloc".to_string(),
+        "__rust_alloc_zeroed".to_string(),
+        "__rust_alloc_error_handler".to_string(),
+    ]
 }
 
-impl FilterMode {
-    /// Default blocklist of common problematic Rust stdlib symbols
-    ///
-    /// Includes:
-    /// - `rust_eh_personality` - Exception handling (main conflict source)
-    /// - `__rust_no_alloc_shim_is_unstable` - Allocation shim marker
-    /// - `__rust_alloc`, `__rust_dealloc`, `__rust_realloc` - Allocator functions
-    /// - `__rust_alloc_zeroed` - Zero-initialized allocation
-    /// - Rust stdlib symbols that may appear in COMDATs
-    ///
-    /// These symbols commonly conflict when linking multiple Rust staticlibs.
-    pub fn default_blocklist() -> Self {
-        FilterMode::Blocklist {
-            remove: vec![
-                // Core Rust runtime/allocator symbols that commonly conflict
-                "rust_eh_personality".to_string(),
-                "__rust_no_alloc_shim_is_unstable".to_string(),
-                "__rust_alloc".to_string(),
-                "__rust_dealloc".to_string(),
-                "__rust_realloc".to_string(),
-                "__rust_alloc_zeroed".to_string(),
-                "__rust_alloc_error_handler".to_string(),
-            ],
-        }
-    }
-}
-
-/// Patches a static library to filter symbols based on the specified mode.
+/// Patches a static library to hide specific symbols.
 ///
 /// # Arguments
 ///
 /// * `static_lib` - Path to the input static library (e.g., `libmylib.a`)
 /// * `out_dir` - Directory for temporary files (use `$OUT_DIR` in build.rs)
 /// * `lib_name` - Base name for temporary files (e.g., "mylib")
-/// * `mode` - Filtering mode (Allowlist or Blocklist)
+/// * `symbols_to_hide` - List of symbol names to hide/localize
 /// * `final_lib` - Path where the patched library will be written
 /// * `target_arch` - Optional target architecture (e.g., "aarch64", "x86_64"). If `None`, uses host architecture.
 ///
@@ -71,44 +48,34 @@ impl FilterMode {
 ///
 /// # Examples
 ///
-/// ## Allowlist mode (library you control)
+/// ## Using default blocklist (hides common Rust stdlib symbols)
 ///
 /// ```rust,no_run
-/// use lib_patcher::{patch_lib, FilterMode};
-/// use std::path::Path;
-///
-/// // Native architecture
-/// patch_lib(
-///     Path::new("target/release/libmylib.a"),
-///     Path::new("out"),
-///     "mylib",
-///     FilterMode::Allowlist { prefix: "mylib_".to_string() },
-///     Path::new("libmylib_patched.a"),
-///     None,
-/// );
-///
-/// // Cross-architecture (e.g., arm64 library on x86_64 host)
-/// patch_lib(
-///     Path::new("target/aarch64-unknown-linux-gnu/release/libmylib.a"),
-///     Path::new("out"),
-///     "mylib",
-///     FilterMode::Allowlist { prefix: "mylib_".to_string() },
-///     Path::new("libmylib_patched.a"),
-///     Some("aarch64"),
-/// );
-/// ```
-///
-/// ## Blocklist mode (third-party library)
-///
-/// ```rust,no_run
-/// use lib_patcher::{patch_lib, FilterMode};
+/// use lib_patcher::{patch_lib, default_symbol_blocklist};
 /// use std::path::Path;
 ///
 /// patch_lib(
 ///     Path::new("vendor/libthirdparty.a"),
 ///     Path::new("out"),
 ///     "thirdparty",
-///     FilterMode::default_blocklist(),
+///     &default_symbol_blocklist(),
+///     Path::new("libthirdparty_patched.a"),
+///     None,
+/// );
+/// ```
+///
+/// ## Using custom blocklist
+///
+/// ```rust,no_run
+/// use lib_patcher::patch_lib;
+/// use std::path::Path;
+///
+/// let symbols = vec!["rust_eh_personality".to_string(), "my_conflict".to_string()];
+/// patch_lib(
+///     Path::new("vendor/libthirdparty.a"),
+///     Path::new("out"),
+///     "thirdparty",
+///     &symbols,
 ///     Path::new("libthirdparty_patched.a"),
 ///     None,
 /// );
@@ -117,7 +84,7 @@ pub fn patch_lib(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    mode: FilterMode,
+    symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
@@ -135,16 +102,35 @@ pub fn patch_lib(
     });
 
     match target_os.as_str() {
-        "windows" => patch_windows(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
-        "macos" | "ios" => {
-            patch_macos(static_lib, out_dir, lib_name, &mode, final_lib, target_arch)
-        }
-        _ => patch_linux(static_lib, out_dir, lib_name, &mode, final_lib, target_arch),
+        "windows" => patch_windows(
+            static_lib,
+            out_dir,
+            lib_name,
+            symbols_to_hide,
+            final_lib,
+            target_arch,
+        ),
+        "macos" | "ios" => patch_macos(
+            static_lib,
+            out_dir,
+            lib_name,
+            symbols_to_hide,
+            final_lib,
+            target_arch,
+        ),
+        _ => patch_linux(
+            static_lib,
+            out_dir,
+            lib_name,
+            symbols_to_hide,
+            final_lib,
+            target_arch,
+        ),
     }
 
     // Verify the patched library
     eprintln!("\nVerifying patched library...");
-    if let Err(e) = verify_patched_lib(final_lib, static_lib, &mode, &target_os) {
+    if let Err(e) = verify_patched_lib(final_lib, static_lib, symbols_to_hide, &target_os) {
         eprintln!("\n❌ VERIFICATION FAILED: {}", e);
         eprintln!("The patched library may be corrupted or incomplete.");
         std::process::exit(1);
@@ -156,7 +142,7 @@ fn patch_windows(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
@@ -170,11 +156,6 @@ fn patch_windows(
     };
     let mut obj_files = Vec::new();
 
-    // Note: llvm-objcopy --localize-symbol does not work correctly on Windows COFF files.
-    // The COFF format uses different symbol visibility mechanisms than ELF.
-    // We must use the manual COFF symbol table patching approach instead.
-    let can_use_objcopy = false;
-
     // Extract and patch each object file
     for member in archive.members() {
         let member = member.expect("Failed to read archive member");
@@ -182,64 +163,20 @@ fn patch_windows(
             .data(archive_bytes.as_slice())
             .expect("Failed to read member data");
 
-        // Write original object to disk
         let idx = obj_files.len();
-        let orig_path = temp_dir.join(format!("{}_extracted.obj", idx));
-        fs::write(&orig_path, &data).expect("Failed to write extracted object");
 
-        let mut final_path = orig_path.clone();
-
-        if can_use_objcopy {
-            // Determine which symbols to localize for this object
-            let mut to_localize: Vec<String> = Vec::new();
-            if let FilterMode::Blocklist { remove } = mode {
-                if let Ok(file) = File::parse(&*data) {
-                    for sym in file.symbols() {
-                        if let Ok(name) = sym.name() {
-                            // Only exact matches for objcopy
-                            if remove.iter().any(|r| r == name) {
-                                to_localize.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !to_localize.is_empty() {
+        // Patch the COFF object file
+        match patch_coff_object(&data, symbols_to_hide) {
+            Ok(patched_data) => {
                 let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
-                let mut cmd = Command::new("llvm-objcopy");
-                for s in &to_localize {
-                    cmd.arg("--localize-symbol").arg(s);
-                }
-                cmd.arg(&orig_path).arg(&patched_path);
-                let status = cmd.status().expect("Failed to run llvm-objcopy");
-                if status.success() {
-                    final_path = patched_path;
-                } else {
-                    eprintln!(
-                        "Warning: llvm-objcopy failed on object {}, falling back to raw patching",
-                        idx
-                    );
-                }
+                fs::write(&patched_path, patched_data).expect("Failed to write patched object");
+                obj_files.push(patched_path);
+            }
+            Err(e) => {
+                eprintln!("Warning: Skipping object ({})", e);
+                // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
             }
         }
-
-        // If objcopy wasn't applicable, fall back to our internal patcher
-        if final_path == orig_path {
-            match patch_coff_object(&data, mode) {
-                Ok(p) => {
-                    let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
-                    fs::write(&patched_path, p).expect("Failed to write patched object");
-                    final_path = patched_path;
-                }
-                Err(e) => {
-                    eprintln!("Warning: Skipping object ({})", e);
-                    continue; // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
-                }
-            }
-        }
-
-        obj_files.push(final_path);
     }
 
     // Determine which library tool to use and the machine type
@@ -403,16 +340,16 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
 
 fn patch_coff_object(
     data: &[u8],
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // For Windows COFF, we patch the symbol table directly instead of rewriting
     // the entire object to preserve weak symbol auxiliary data and other COFF-specific info
-    patch_coff_symbol_table(data, mode)
+    patch_coff_symbol_table(data, symbols_to_hide)
 }
 
 fn patch_coff_symbol_table(
     data: &[u8],
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use object::LittleEndian as LE;
     use object::pe;
@@ -426,7 +363,7 @@ fn patch_coff_symbol_table(
     let is_bigobj = data.len() >= 4 && data[0..2] == [0x00, 0x00] && data[2..4] == [0xFF, 0xFF];
 
     if is_bigobj {
-        return patch_coff_bigobj_symbol_table(data, mode);
+        return patch_coff_bigobj_symbol_table(data, symbols_to_hide);
     }
 
     let mut offset = 0u64;
@@ -517,17 +454,14 @@ fn patch_coff_symbol_table(
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
 
-        let matches_filter = match mode {
-            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove } => !remove.iter().any(|pattern| {
-                if pattern.ends_with('*') {
-                    let prefix = &pattern[..pattern.len() - 1];
-                    name.starts_with(prefix)
-                } else {
-                    &name == pattern
-                }
-            }),
-        };
+        let matches_filter = !symbols_to_hide.iter().any(|pattern| {
+            if pattern.ends_with('*') {
+                let prefix = &pattern[..pattern.len() - 1];
+                name.starts_with(prefix)
+            } else {
+                &name == pattern
+            }
+        });
 
         // Keep COMDAT leader symbols global to preserve linker selection semantics,
         // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
@@ -551,7 +485,7 @@ fn patch_coff_symbol_table(
 
 fn patch_coff_bigobj_symbol_table(
     mut data: Vec<u8>,
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Big obj format has a 56-byte header
     // Offset 48: pointer to symbol table (u32)
@@ -641,17 +575,14 @@ fn patch_coff_bigobj_symbol_table(
 
         let is_special = name.starts_with('@');
 
-        let matches_filter = match mode {
-            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove } => !remove.iter().any(|pattern| {
-                if pattern.ends_with('*') {
-                    let prefix = &pattern[..pattern.len() - 1];
-                    name.starts_with(prefix)
-                } else {
-                    &name == pattern
-                }
-            }),
-        };
+        let matches_filter = !symbols_to_hide.iter().any(|pattern| {
+            if pattern.ends_with('*') {
+                let prefix = &pattern[..pattern.len() - 1];
+                name.starts_with(prefix)
+            } else {
+                &name == pattern
+            }
+        });
 
         // Keep COMDAT leader symbols global to preserve linker selection semantics,
         // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
@@ -677,248 +608,12 @@ fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::e
     Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
 }
 
-// Keep the old implementation as a fallback (currently unused)
-#[allow(dead_code)]
-fn patch_coff_object_full_rewrite(
-    data: &[u8],
-    mode: &FilterMode,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use std::collections::HashMap;
-
-    let file = File::parse(data)?;
-    let mut writer = WriteObject::new(file.format(), file.architecture(), file.endianness());
-
-    let mut section_map = HashMap::new();
-    let mut symbol_map = HashMap::new();
-    let mut section_sym_map = HashMap::new();
-
-    // Collect COMDAT symbol indices - these must stay global for linker deduplication
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
-
-    // Copy sections and create section symbols
-    for section in file.sections() {
-        let name_bytes = match section.name_bytes() {
-            Ok(n) if !n.is_empty() => n,
-            _ => continue,
-        };
-        let name = name_bytes.to_vec();
-        let kind = section.kind();
-        let id = writer.add_section(Vec::new(), name.clone(), kind);
-
-        let align = section.align();
-        if kind != SectionKind::UninitializedData {
-            if let Ok(data) = section.uncompressed_data() {
-                let data_bytes = data.into_owned();
-                writer.section_mut(id).set_data(data_bytes, align.max(1));
-            }
-        } else {
-            let size = section.size();
-            let section_mut = writer.section_mut(id);
-            section_mut.append_bss(size, align.max(1));
-        }
-
-        if let SectionFlags::Coff { characteristics } = section.flags() {
-            writer.section_mut(id).flags = SectionFlags::Coff { characteristics };
-        }
-
-        // Create section symbol
-        let sec_sym = Symbol {
-            name: name.clone(),
-            value: 0,
-            size: 0,
-            kind: SymbolKind::Section,
-            scope: object::SymbolScope::Compilation,
-            weak: false,
-            section: SymbolSection::Section(id),
-            flags: SymbolFlags::None,
-        };
-        let sec_sym_id = writer.add_symbol(sec_sym);
-
-        section_map.insert(section.index().0, id);
-        section_sym_map.insert(section.index().0, sec_sym_id);
-    }
-
-    // Copy symbols - filter based on mode
-    for symbol in file.symbols() {
-        let orig_idx = symbol.index().0;
-
-        // Map section symbols to our created section symbols
-        if symbol.kind() == SymbolKind::Section {
-            if let object::SymbolSection::Section(sec_idx) = symbol.section() {
-                if let Some(&sec_sym_id) = section_sym_map.get(&sec_idx.0) {
-                    symbol_map.insert(orig_idx, sec_sym_id);
-                    continue;
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        }
-
-        let name = symbol.name().unwrap_or("").to_string();
-
-        // Always keep special MSVC symbols (like @feat.00)
-        let is_special_symbol = name.starts_with('@');
-
-        // COMDAT symbols MUST stay global for linker deduplication to work
-        // UNLESS they're explicitly in the blocklist (for Rust stdlib symbols)
-        // let is_comdat_symbol = comdat_symbols.contains(&orig_idx);
-
-        // Check if symbol matches filter before considering COMDAT
-        let matches_filter = match mode {
-            FilterMode::Allowlist { prefix } => name.starts_with(prefix),
-            FilterMode::Blocklist { remove } => {
-                // Check if symbol is in blocklist (exact match or starts with pattern)
-                !remove.iter().any(|pattern| {
-                    if pattern.ends_with('*') {
-                        // Wildcard pattern - check prefix
-                        let prefix = &pattern[..pattern.len() - 1];
-                        name.starts_with(prefix)
-                    } else {
-                        // Exact match
-                        &name == pattern
-                    }
-                })
-            }
-        };
-
-        // Determine if this symbol should be kept as global
-        let keep_global = is_special_symbol || matches_filter;
-
-        let section = match symbol.section() {
-            object::SymbolSection::Section(idx) => section_map
-                .get(&idx.0)
-                .map(|&s| SymbolSection::Section(s))
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "Warning: Symbol '{}' references missing section {}",
-                        name, idx.0
-                    );
-                    SymbolSection::Undefined
-                }),
-            object::SymbolSection::Undefined => SymbolSection::Undefined,
-            object::SymbolSection::Absolute => {
-                // Don't create absolute symbols for functions - they can't be used as relocation targets
-                if symbol.kind() == SymbolKind::Text || symbol.kind() == SymbolKind::Unknown {
-                    eprintln!(
-                        "Warning: Converting absolute symbol '{}' to undefined to avoid link errors",
-                        name
-                    );
-                    SymbolSection::Undefined
-                } else {
-                    SymbolSection::Absolute
-                }
-            }
-            object::SymbolSection::Common => SymbolSection::Common,
-            _ => SymbolSection::Undefined,
-        };
-
-        // Skip empty-named symbols in sections (except special symbols)
-        if name.is_empty() && matches!(section, SymbolSection::Section(_)) && !is_special_symbol {
-            continue;
-        }
-
-        let wsym = Symbol {
-            name: name.into_bytes(),
-            value: symbol.address(),
-            size: symbol.size(),
-            kind: symbol.kind(),
-            scope: if keep_global {
-                symbol.scope()
-            } else {
-                object::SymbolScope::Compilation
-            },
-            weak: symbol.is_weak(),
-            section,
-            flags: SymbolFlags::None,
-        };
-
-        let id = writer.add_symbol(wsym);
-        symbol_map.insert(orig_idx, id);
-    }
-
-    // Re-create COMDAT groups to preserve section selection on Windows.
-    let mut comdat_count = 0;
-    for comdat in file.comdats() {
-        let symbol_index = comdat.symbol();
-        let Some(&symbol_id) = symbol_map.get(&symbol_index.0) else {
-            eprintln!(
-                "Warning: COMDAT symbol index {} not found in symbol_map",
-                symbol_index.0
-            );
-            continue;
-        };
-
-        let mut sections = Vec::new();
-        for section_index in comdat.sections() {
-            if let Some(&section_id) = section_map.get(&section_index.0) {
-                sections.push(section_id);
-            }
-        }
-
-        if sections.is_empty() {
-            continue;
-        }
-
-        let kind = comdat.kind();
-        writer.add_comdat(Comdat {
-            kind,
-            symbol: symbol_id,
-            sections,
-        });
-        comdat_count += 1;
-    }
-    if comdat_count > 0 {
-        eprintln!("Created {} COMDAT groups", comdat_count);
-    }
-
-    // Copy relocations
-    for section in file.sections() {
-        let Some(&new_sec) = section_map.get(&section.index().0) else {
-            continue;
-        };
-
-        for (offset, reloc) in section.relocations() {
-            if let RelocationTarget::Symbol(idx) = reloc.target() {
-                // Try symbol_map first, then section_sym_map
-                let target_sym = symbol_map
-                    .get(&idx.0)
-                    .or_else(|| section_sym_map.get(&idx.0))
-                    .copied();
-
-                if let Some(sym) = target_sym {
-                    let flags = object::write::RelocationFlags::Generic {
-                        kind: reloc.kind(),
-                        encoding: reloc.encoding(),
-                        size: reloc.size(),
-                    };
-                    writer.add_relocation(
-                        new_sec,
-                        Relocation {
-                            offset,
-                            symbol: sym,
-                            addend: reloc.addend(),
-                            flags,
-                        },
-                    )?;
-                }
-            }
-        }
-    }
-
-    Ok(writer.write()?)
-}
-
 // macOS/iOS: Use ld -r with exported_symbols_list
 fn patch_macos(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
@@ -1042,40 +737,19 @@ fn patch_macos(
     all_symbols.sort();
     all_symbols.dedup();
 
-    // Filter symbols based on mode
-    let symbols_to_keep: Vec<String> = match mode {
-        FilterMode::Allowlist { prefix } => {
-            all_symbols
-                .into_iter()
-                .filter(|sym| {
-                    // macOS prefixes symbols with underscore, so _mylib_add needs to match "mylib_"
-                    let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
-                    sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
-                })
-                .collect()
-        }
-        FilterMode::Blocklist { remove } => all_symbols
-            .into_iter()
-            .filter(|sym| {
-                // Remove both with and without underscore prefix
-                let without_underscore = sym.strip_prefix('_').unwrap_or(sym);
-                !remove.contains(sym) && !remove.iter().any(|r| r == without_underscore)
-            })
-            .collect(),
-    };
+    // Filter symbols based on symbols_to_hide
+    let symbols_to_keep: Vec<String> = all_symbols
+        .into_iter()
+        .filter(|sym| {
+            // Remove both with and without underscore prefix
+            let without_underscore = sym.strip_prefix('_').unwrap_or(sym);
+            !symbols_to_hide.contains(sym)
+                && !symbols_to_hide.iter().any(|r| r == without_underscore)
+        })
+        .collect();
 
     if symbols_to_keep.is_empty() {
-        match mode {
-            FilterMode::Allowlist { prefix } => {
-                panic!(
-                    "No symbols found matching prefix '{}'. Did you forget to prefix your public functions?",
-                    prefix
-                );
-            }
-            FilterMode::Blocklist { .. } => {
-                eprintln!("Warning: All symbols were removed. This may not be intended.");
-            }
-        }
+        eprintln!("Warning: All symbols were removed. This may not be intended.");
     }
 
     fs::write(&symbols_file, symbols_to_keep.join("\n")).expect("Failed to write symbols file");
@@ -1114,7 +788,7 @@ fn patch_linux(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
@@ -1153,34 +827,16 @@ fn patch_linux(
         .unwrap_or_else(|_| panic!("Failed to run {}", ld_cmd));
     assert!(status.success(), "{} -r failed", ld_cmd);
 
-    // Filter symbols based on mode
-    match mode {
-        FilterMode::Allowlist { prefix } => {
-            // Use objcopy with wildcard to keep only prefixed symbols
-            let wildcard = format!("{}*", prefix);
-            let status = Command::new(&objcopy_cmd)
-                .arg("--wildcard")
-                .arg("--keep-global-symbol")
-                .arg(&wildcard)
-                .arg(&intermediate)
-                .arg(&final_obj)
-                .status()
-                .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
-            assert!(status.success(), "{} failed", objcopy_cmd);
-        }
-        FilterMode::Blocklist { remove } => {
-            // Use objcopy to localize specific symbols
-            let mut cmd = Command::new(&objcopy_cmd);
-            for symbol in remove {
-                cmd.arg("--localize-symbol").arg(symbol);
-            }
-            cmd.arg(&intermediate).arg(&final_obj);
-            let status = cmd
-                .status()
-                .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
-            assert!(status.success(), "{} failed", objcopy_cmd);
-        }
+    // Filter symbols - use objcopy to localize specific symbols
+    let mut cmd = Command::new(&objcopy_cmd);
+    for symbol in symbols_to_hide {
+        cmd.arg("--localize-symbol").arg(symbol);
     }
+    cmd.arg(&intermediate).arg(&final_obj);
+    let status = cmd
+        .status()
+        .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
+    assert!(status.success(), "{} failed", objcopy_cmd);
 
     // Create archive (try specified ar, fallback to llvm-ar)
     let ar_result = Command::new(&ar_cmd)
@@ -1260,7 +916,7 @@ fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
 ///
 /// * `static_lib` - Path to the patched static library
 /// * `original_lib` - Path to the original static library (for size comparison)
-/// * `mode` - The filter mode that was applied
+/// * `symbols_to_hide` - The list of symbols that should be hidden
 ///
 /// # Returns
 ///
@@ -1268,7 +924,7 @@ fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
 fn verify_patched_lib(
     static_lib: &Path,
     original_lib: &Path,
-    mode: &FilterMode,
+    symbols_to_hide: &[String],
     target_os: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Check that output file exists
@@ -1311,49 +967,30 @@ fn verify_patched_lib(
     }
 
     // 4. Verify the filtering worked as expected
-    match mode {
-        FilterMode::Allowlist { prefix } => {
-            // Check that at least one symbol with the prefix exists
-            let matching_symbols: Vec<_> =
-                symbols.iter().filter(|s| s.starts_with(prefix)).collect();
+    // Check that blocked symbols are either gone or made local
+    // (We can't easily check if they're local vs gone, but at least they shouldn't be global)
+    let still_global: Vec<_> = symbols
+        .iter()
+        .filter(|s| symbols_to_hide.contains(&s.to_string()))
+        .collect();
 
-            if matching_symbols.is_empty() {
-                return Err(format!(
-                    "No symbols found with prefix '{}' in output library. Expected at least one public symbol with this prefix.",
-                    prefix
-                ).into());
-            }
-
-            eprintln!(
-                "  ✓ Found {} public symbols with prefix '{}'",
-                matching_symbols.len(),
-                prefix
-            );
-        }
-        FilterMode::Blocklist { remove } => {
-            // Check that blocked symbols are either gone or made local
-            // (We can't easily check if they're local vs gone, but at least they shouldn't be global)
-            let still_global: Vec<_> = symbols
+    if !still_global.is_empty() {
+        return Err(format!(
+            "The following symbols are still global after patching: {}",
+            still_global
                 .iter()
-                .filter(|s| remove.contains(&s.to_string()))
-                .collect();
-
-            if !still_global.is_empty() {
-                return Err(format!(
-                    "The following symbols are still global after patching: {}",
-                    still_global
-                        .iter()
-                        .take(5)
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-                .into());
-            }
-
-            eprintln!("  ✓ Verified {} symbols are no longer global", remove.len());
-        }
+                .take(5)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
     }
+
+    eprintln!(
+        "  ✓ Verified {} symbols are no longer global",
+        symbols_to_hide.len()
+    );
 
     eprintln!(
         "  ✓ Output library contains {} total public symbols",
