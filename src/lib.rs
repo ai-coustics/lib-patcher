@@ -6,11 +6,7 @@ use std::process::Command;
 
 use object::ObjectComdat;
 use object::read::File;
-use object::write::{Comdat, Object as WriteObject, Relocation, Symbol, SymbolSection};
-use object::{
-    Object as ObjectTrait, ObjectSection, ObjectSymbol, RelocationTarget, SectionFlags,
-    SectionKind, SymbolFlags, SymbolKind,
-};
+use object::{Object as ObjectTrait, ObjectSymbol};
 
 /// Default blocklist of common problematic Rust stdlib symbols
 ///
@@ -160,11 +156,6 @@ fn patch_windows(
     };
     let mut obj_files = Vec::new();
 
-    // Note: llvm-objcopy --localize-symbol does not work correctly on Windows COFF files.
-    // The COFF format uses different symbol visibility mechanisms than ELF.
-    // We must use the manual COFF symbol table patching approach instead.
-    let can_use_objcopy = false;
-
     // Extract and patch each object file
     for member in archive.members() {
         let member = member.expect("Failed to read archive member");
@@ -172,62 +163,20 @@ fn patch_windows(
             .data(archive_bytes.as_slice())
             .expect("Failed to read member data");
 
-        // Write original object to disk
         let idx = obj_files.len();
-        let orig_path = temp_dir.join(format!("{}_extracted.obj", idx));
-        fs::write(&orig_path, &data).expect("Failed to write extracted object");
 
-        let mut final_path = orig_path.clone();
-
-        if can_use_objcopy {
-            // Determine which symbols to localize for this object
-            let mut to_localize: Vec<String> = Vec::new();
-            if let Ok(file) = File::parse(&*data) {
-                for sym in file.symbols() {
-                    if let Ok(name) = sym.name() {
-                        // Only exact matches for objcopy
-                        if symbols_to_hide.iter().any(|r| r == name) {
-                            to_localize.push(name.to_string());
-                        }
-                    }
-                }
-            }
-
-            if !to_localize.is_empty() {
+        // Patch the COFF object file
+        match patch_coff_object(&data, symbols_to_hide) {
+            Ok(patched_data) => {
                 let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
-                let mut cmd = Command::new("llvm-objcopy");
-                for s in &to_localize {
-                    cmd.arg("--localize-symbol").arg(s);
-                }
-                cmd.arg(&orig_path).arg(&patched_path);
-                let status = cmd.status().expect("Failed to run llvm-objcopy");
-                if status.success() {
-                    final_path = patched_path;
-                } else {
-                    eprintln!(
-                        "Warning: llvm-objcopy failed on object {}, falling back to raw patching",
-                        idx
-                    );
-                }
+                fs::write(&patched_path, patched_data).expect("Failed to write patched object");
+                obj_files.push(patched_path);
+            }
+            Err(e) => {
+                eprintln!("Warning: Skipping object ({})", e);
+                // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
             }
         }
-
-        // If objcopy wasn't applicable, fall back to our internal patcher
-        if final_path == orig_path {
-            match patch_coff_object(&data, symbols_to_hide) {
-                Ok(p) => {
-                    let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
-                    fs::write(&patched_path, p).expect("Failed to write patched object");
-                    final_path = patched_path;
-                }
-                Err(e) => {
-                    eprintln!("Warning: Skipping object ({})", e);
-                    continue; // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
-                }
-            }
-        }
-
-        obj_files.push(final_path);
     }
 
     // Determine which library tool to use and the machine type
@@ -657,236 +606,6 @@ fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::e
         .position(|&b| b == 0)
         .unwrap_or(data.len() - offset);
     Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
-}
-
-// Keep the old implementation as a fallback (currently unused)
-#[allow(dead_code)]
-fn patch_coff_object_full_rewrite(
-    data: &[u8],
-    symbols_to_hide: &[String],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use std::collections::HashMap;
-
-    let file = File::parse(data)?;
-    let mut writer = WriteObject::new(file.format(), file.architecture(), file.endianness());
-
-    let mut section_map = HashMap::new();
-    let mut symbol_map = HashMap::new();
-    let mut section_sym_map = HashMap::new();
-
-    // Collect COMDAT symbol indices - these must stay global for linker deduplication
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
-
-    // Copy sections and create section symbols
-    for section in file.sections() {
-        let name_bytes = match section.name_bytes() {
-            Ok(n) if !n.is_empty() => n,
-            _ => continue,
-        };
-        let name = name_bytes.to_vec();
-        let kind = section.kind();
-        let id = writer.add_section(Vec::new(), name.clone(), kind);
-
-        let align = section.align();
-        if kind != SectionKind::UninitializedData {
-            if let Ok(data) = section.uncompressed_data() {
-                let data_bytes = data.into_owned();
-                writer.section_mut(id).set_data(data_bytes, align.max(1));
-            }
-        } else {
-            let size = section.size();
-            let section_mut = writer.section_mut(id);
-            section_mut.append_bss(size, align.max(1));
-        }
-
-        if let SectionFlags::Coff { characteristics } = section.flags() {
-            writer.section_mut(id).flags = SectionFlags::Coff { characteristics };
-        }
-
-        // Create section symbol
-        let sec_sym = Symbol {
-            name: name.clone(),
-            value: 0,
-            size: 0,
-            kind: SymbolKind::Section,
-            scope: object::SymbolScope::Compilation,
-            weak: false,
-            section: SymbolSection::Section(id),
-            flags: SymbolFlags::None,
-        };
-        let sec_sym_id = writer.add_symbol(sec_sym);
-
-        section_map.insert(section.index().0, id);
-        section_sym_map.insert(section.index().0, sec_sym_id);
-    }
-
-    // Copy symbols - filter based on mode
-    for symbol in file.symbols() {
-        let orig_idx = symbol.index().0;
-
-        // Map section symbols to our created section symbols
-        if symbol.kind() == SymbolKind::Section {
-            if let object::SymbolSection::Section(sec_idx) = symbol.section() {
-                if let Some(&sec_sym_id) = section_sym_map.get(&sec_idx.0) {
-                    symbol_map.insert(orig_idx, sec_sym_id);
-                    continue;
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        }
-
-        let name = symbol.name().unwrap_or("").to_string();
-
-        // Always keep special MSVC symbols (like @feat.00)
-        let is_special_symbol = name.starts_with('@');
-
-        // COMDAT symbols MUST stay global for linker deduplication to work
-        // UNLESS they're explicitly in the blocklist (for Rust stdlib symbols)
-        // let is_comdat_symbol = comdat_symbols.contains(&orig_idx);
-
-        // Check if symbol matches filter before considering COMDAT
-        let matches_filter = !symbols_to_hide.iter().any(|pattern| {
-            if pattern.ends_with('*') {
-                // Wildcard pattern - check prefix
-                let prefix = &pattern[..pattern.len() - 1];
-                name.starts_with(prefix)
-            } else {
-                // Exact match
-                &name == pattern
-            }
-        });
-
-        // Determine if this symbol should be kept as global
-        let keep_global = is_special_symbol || matches_filter;
-
-        let section = match symbol.section() {
-            object::SymbolSection::Section(idx) => section_map
-                .get(&idx.0)
-                .map(|&s| SymbolSection::Section(s))
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "Warning: Symbol '{}' references missing section {}",
-                        name, idx.0
-                    );
-                    SymbolSection::Undefined
-                }),
-            object::SymbolSection::Undefined => SymbolSection::Undefined,
-            object::SymbolSection::Absolute => {
-                // Don't create absolute symbols for functions - they can't be used as relocation targets
-                if symbol.kind() == SymbolKind::Text || symbol.kind() == SymbolKind::Unknown {
-                    eprintln!(
-                        "Warning: Converting absolute symbol '{}' to undefined to avoid link errors",
-                        name
-                    );
-                    SymbolSection::Undefined
-                } else {
-                    SymbolSection::Absolute
-                }
-            }
-            object::SymbolSection::Common => SymbolSection::Common,
-            _ => SymbolSection::Undefined,
-        };
-
-        // Skip empty-named symbols in sections (except special symbols)
-        if name.is_empty() && matches!(section, SymbolSection::Section(_)) && !is_special_symbol {
-            continue;
-        }
-
-        let wsym = Symbol {
-            name: name.into_bytes(),
-            value: symbol.address(),
-            size: symbol.size(),
-            kind: symbol.kind(),
-            scope: if keep_global {
-                symbol.scope()
-            } else {
-                object::SymbolScope::Compilation
-            },
-            weak: symbol.is_weak(),
-            section,
-            flags: SymbolFlags::None,
-        };
-
-        let id = writer.add_symbol(wsym);
-        symbol_map.insert(orig_idx, id);
-    }
-
-    // Re-create COMDAT groups to preserve section selection on Windows.
-    let mut comdat_count = 0;
-    for comdat in file.comdats() {
-        let symbol_index = comdat.symbol();
-        let Some(&symbol_id) = symbol_map.get(&symbol_index.0) else {
-            eprintln!(
-                "Warning: COMDAT symbol index {} not found in symbol_map",
-                symbol_index.0
-            );
-            continue;
-        };
-
-        let mut sections = Vec::new();
-        for section_index in comdat.sections() {
-            if let Some(&section_id) = section_map.get(&section_index.0) {
-                sections.push(section_id);
-            }
-        }
-
-        if sections.is_empty() {
-            continue;
-        }
-
-        let kind = comdat.kind();
-        writer.add_comdat(Comdat {
-            kind,
-            symbol: symbol_id,
-            sections,
-        });
-        comdat_count += 1;
-    }
-    if comdat_count > 0 {
-        eprintln!("Created {} COMDAT groups", comdat_count);
-    }
-
-    // Copy relocations
-    for section in file.sections() {
-        let Some(&new_sec) = section_map.get(&section.index().0) else {
-            continue;
-        };
-
-        for (offset, reloc) in section.relocations() {
-            if let RelocationTarget::Symbol(idx) = reloc.target() {
-                // Try symbol_map first, then section_sym_map
-                let target_sym = symbol_map
-                    .get(&idx.0)
-                    .or_else(|| section_sym_map.get(&idx.0))
-                    .copied();
-
-                if let Some(sym) = target_sym {
-                    let flags = object::write::RelocationFlags::Generic {
-                        kind: reloc.kind(),
-                        encoding: reloc.encoding(),
-                        size: reloc.size(),
-                    };
-                    writer.add_relocation(
-                        new_sec,
-                        Relocation {
-                            offset,
-                            symbol: sym,
-                            addend: reloc.addend(),
-                            flags,
-                        },
-                    )?;
-                }
-            }
-        }
-    }
-
-    Ok(writer.write()?)
 }
 
 // macOS/iOS: Use ld -r with exported_symbols_list
