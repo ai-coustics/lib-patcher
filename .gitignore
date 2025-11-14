@@ -1,2 +1,2 @@
 **/target
-examples/mylib-test-c/mylib-test-c
+tests/c-consumer/testlib-test

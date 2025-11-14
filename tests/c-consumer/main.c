@@ -13,7 +13,7 @@ extern int32_t testlib_get_magic(void);
 
 int main(void) {
     int errors = 0;
-    
+
     printf("Testing patched testlib from C\n");
     printf("=================================\n\n");
 

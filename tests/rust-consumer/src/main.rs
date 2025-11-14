@@ -30,8 +30,8 @@ fn main() {
     println!("First, testing that this Rust binary's own features work:");
 
     // Use our own rand (potentially different version)
-    let mut rng = rand::thread_rng();
-    let local_random: i32 = rng.gen_range(0..100);
+    let mut rng = rand::rng();
+    let local_random: i32 = rng.random_range(0..100);
     println!("  Local rand::gen_range(0..100) = {} ✓", local_random);
 
     // Use our own HashMap
@@ -72,7 +72,7 @@ fn main() {
 
         let random = testlib_random_number(100);
         print!("  testlib_random_number(100) = {} ", random);
-        if random >= 0 && random < 100 {
+        if (0..100).contains(&random) {
             println!("✓");
         } else {
             println!("✗ (expected 0-99)");
