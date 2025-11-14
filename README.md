@@ -179,26 +179,49 @@ patch_lib(
 → In Allowlist mode: You're probably calling an unprefixed function from C. Check that ALL FFI functions have your prefix.
 → In Blocklist mode: A symbol you're using was added to the blocklist by mistake.
 
-## Example Projects
+## Testing
 
-This repository includes three example projects in the `examples/` directory.
+This repository includes comprehensive integration tests in the `tests/` directory that verify the tool works correctly across all platforms.
 
-### Quick Demo
+### Running Tests
 
 ```bash
-# Build the library (Rust stable)
-cd examples/mylib && cargo build --release
-
-# Try unpatched version (Rust beta) - FAILS with `rust-lld: error: duplicate symbol: rust_eh_personality`
-cd ../mylib-test-unpatched && cargo build --release
-
-# Try patched version (Rust beta) - SUCCEEDS
-cd ../mylib-test && cargo run --release
-
-cd ../mylib-test-c && ./patch.sh && make run
+# Run the full test suite
+cd tests
+./run_tests.sh
 ```
 
-**Result**: The patched version successfully links a library built with one Rust version into a binary built with another Rust version, while the unpatched version fails with duplicate symbol errors.
+Or run individual steps:
+
+```bash
+# 1. Build the CLI tool
+cargo build --release
+
+# 2. Build test library (with rand, serde, lots of std symbols)
+cd tests/testlib && cargo build --release
+
+# 3. Patch it in blocklist mode
+./target/release/lib-patcher blocklist \
+  --input tests/testlib/target/release/libtestlib.a \
+  --output tests/testlib/target/release/libtestlib_patched.a
+
+# 4. Test from C
+cd tests/c-consumer && make && ./testlib-test
+
+# 5. Test from Rust (different version - this is the key test!)
+cd tests/rust-consumer && cargo +beta run --release
+```
+
+### What Gets Tested
+
+The test suite verifies:
+- **Real dependencies**: Uses rand, serde, serde_json to generate realistic symbol counts
+- **Blocklist mode**: Hides Rust stdlib symbols while keeping library functions
+- **C interop**: C code can successfully link and call the patched library
+- **Cross-version Rust**: A Rust program with a **different stdlib version** can link without conflicts
+- **Platform coverage**: CI runs on Linux, macOS, and Windows
+
+The rust-consumer test is the critical one - it's built with Rust beta and uses rand 0.9, while testlib is built with Rust stable and uses rand 0.8. Without patching, this would fail with symbol conflicts.
 
 ## License
 

@@ -41,6 +41,7 @@ impl FilterMode {
     pub fn default_blocklist() -> Self {
         FilterMode::Blocklist {
             remove: vec![
+                // Core Rust runtime/allocator symbols that commonly conflict
                 "rust_eh_personality".to_string(),
                 "__rust_no_alloc_shim_is_unstable".to_string(),
                 "__rust_alloc".to_string(),
@@ -48,10 +49,6 @@ impl FilterMode {
                 "__rust_realloc".to_string(),
                 "__rust_alloc_zeroed".to_string(),
                 "__rust_alloc_error_handler".to_string(),
-                // Hide specific problematic mangled Rust stdlib symbols
-                // Only hide panicking and eh symbols, not all std symbols
-                "_ZN3std9panicking*".to_string(), // std::panicking::
-                "_ZN4core9panicking*".to_string(), // core::panicking::
             ],
         }
     }
@@ -163,31 +160,86 @@ fn patch_windows(
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
-    use std::io::Read;
-
     let temp_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-    let archive_file = fs::File::open(static_lib).expect("Failed to open static lib");
-    let mut archive = ar::Archive::new(archive_file);
+    let archive_bytes = fs::read(static_lib).expect("Failed to read static lib");
+    let archive = match object::read::archive::ArchiveFile::parse(&*archive_bytes) {
+        Ok(a) => a,
+        Err(e) => panic!("Failed to parse static lib as COFF archive: {}", e),
+    };
     let mut obj_files = Vec::new();
 
+    // Note: llvm-objcopy --localize-symbol does not work correctly on Windows COFF files.
+    // The COFF format uses different symbol visibility mechanisms than ELF.
+    // We must use the manual COFF symbol table patching approach instead.
+    let can_use_objcopy = false;
+
     // Extract and patch each object file
-    while let Some(Ok(mut entry)) = archive.next_entry() {
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data).expect("Failed to read entry");
+    for member in archive.members() {
+        let member = member.expect("Failed to read archive member");
+        let data = member
+            .data(archive_bytes.as_slice())
+            .expect("Failed to read member data");
 
-        let patched = match patch_coff_object(&data, mode) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Warning: Skipping object ({})", e);
-                continue; // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
+        // Write original object to disk
+        let idx = obj_files.len();
+        let orig_path = temp_dir.join(format!("{}_extracted.obj", idx));
+        fs::write(&orig_path, &data).expect("Failed to write extracted object");
+
+        let mut final_path = orig_path.clone();
+
+        if can_use_objcopy {
+            // Determine which symbols to localize for this object
+            let mut to_localize: Vec<String> = Vec::new();
+            if let FilterMode::Blocklist { remove } = mode {
+                if let Ok(file) = File::parse(&*data) {
+                    for sym in file.symbols() {
+                        if let Ok(name) = sym.name() {
+                            // Only exact matches for objcopy
+                            if remove.iter().any(|r| r == name) {
+                                to_localize.push(name.to_string());
+                            }
+                        }
+                    }
+                }
             }
-        };
 
-        let out_path = temp_dir.join(format!("{}.obj", obj_files.len()));
-        fs::write(&out_path, patched).expect("Failed to write object");
-        obj_files.push(out_path);
+            if !to_localize.is_empty() {
+                let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
+                let mut cmd = Command::new("llvm-objcopy");
+                for s in &to_localize {
+                    cmd.arg("--localize-symbol").arg(s);
+                }
+                cmd.arg(&orig_path).arg(&patched_path);
+                let status = cmd.status().expect("Failed to run llvm-objcopy");
+                if status.success() {
+                    final_path = patched_path;
+                } else {
+                    eprintln!(
+                        "Warning: llvm-objcopy failed on object {}, falling back to raw patching",
+                        idx
+                    );
+                }
+            }
+        }
+
+        // If objcopy wasn't applicable, fall back to our internal patcher
+        if final_path == orig_path {
+            match patch_coff_object(&data, mode) {
+                Ok(p) => {
+                    let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
+                    fs::write(&patched_path, p).expect("Failed to write patched object");
+                    final_path = patched_path;
+                }
+                Err(e) => {
+                    eprintln!("Warning: Skipping object ({})", e);
+                    continue; // Skip files that can't be patched (e.g., import libs, LLVM bitcode)
+                }
+            }
+        }
+
+        obj_files.push(final_path);
     }
 
     // Determine which library tool to use and the machine type
@@ -296,25 +348,7 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     // Check if we're doing cross-architecture
     let is_cross = target_arch_str != host_arch;
 
-    // Try to use llvm-ar first (available via rustup component add llvm-tools-preview)
-    // This works for both native and cross-compilation scenarios
-    if Command::new("llvm-ar").arg("--version").output().is_ok() {
-        if is_cross {
-            eprintln!(
-                "Using llvm-ar for cross-architecture Windows build ({} -> {})",
-                host_arch, target_arch_str
-            );
-        } else {
-            eprintln!("Using llvm-ar for Windows build");
-        }
-        return WindowsLibTool {
-            tool: "llvm-ar".to_string(),
-            machine_type,
-            is_llvm: true,
-        };
-    }
-
-    // Fall back to lib.exe (requires MSVC Build Tools)
+    // Prefer MSVC lib.exe when available (produces COFF libraries accepted by link.exe)
     if Command::new("lib.exe").arg("/?").output().is_ok() {
         eprintln!("Using lib.exe for Windows build");
         return WindowsLibTool {
@@ -324,11 +358,46 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
         };
     }
 
+    // Next prefer llvm-lib (COFF-compatible, command-line compatible with lib.exe)
+    if Command::new("llvm-lib").arg("/?").output().is_ok() {
+        if is_cross {
+            eprintln!(
+                "Using llvm-lib for cross-architecture Windows build ({} -> {})",
+                host_arch, target_arch_str
+            );
+        } else {
+            eprintln!("Using llvm-lib for Windows build");
+        }
+        return WindowsLibTool {
+            tool: "llvm-lib".to_string(),
+            machine_type,
+            is_llvm: false, // llvm-lib uses lib.exe-style flags
+        };
+    }
+
+    // Fall back to llvm-ar as a last resort. Note: this produces GNU ar archives,
+    // which MSVC link.exe may not accept. Prefer lib.exe/llvm-lib when possible.
+    if Command::new("llvm-ar").arg("--version").output().is_ok() {
+        if is_cross {
+            eprintln!(
+                "Using llvm-ar for cross-architecture Windows build ({} -> {})",
+                host_arch, target_arch_str
+            );
+        } else {
+            eprintln!("Using llvm-ar for Windows build (warning: produces GNU ar archives)");
+        }
+        return WindowsLibTool {
+            tool: "llvm-ar".to_string(),
+            machine_type,
+            is_llvm: true,
+        };
+    }
+
     // No suitable tool found
     panic!(
         "No library archiver tool found for Windows. Please install one of:\n\
-         1. LLVM tools (recommended): rustup component add llvm-tools-preview\n\
-         2. MSVC Build Tools: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022"
+         1. MSVC Build Tools (recommended): provides lib.exe\n\
+         2. LLVM tools: provides llvm-lib (preferred) or llvm-ar (fallback)"
     );
 }
 
@@ -447,7 +516,6 @@ fn patch_coff_symbol_table(
 
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
-        // let is_comdat = comdat_symbols.contains(&i);
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
@@ -461,7 +529,10 @@ fn patch_coff_symbol_table(
             }),
         };
 
-        let keep_global = is_special || matches_filter;
+        // Keep COMDAT leader symbols global to preserve linker selection semantics,
+        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
+        let is_comdat = comdat_symbols.contains(&i);
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -582,7 +653,10 @@ fn patch_coff_bigobj_symbol_table(
             }),
         };
 
-        let keep_global = is_special || matches_filter;
+        // Keep COMDAT leader symbols global to preserve linker selection semantics,
+        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
+        let is_comdat = comdat_symbols.contains(&i);
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
@@ -866,65 +940,56 @@ fn patch_macos(
         a => a,
     };
 
+    let temp_obj_dir = out_dir.join(format!("{}_objs", lib_name));
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let symbols_file = out_dir.join("symbols.txt");
 
-    // Extract object files from archive to run nm on them (avoids LLVM version mismatch)
-    let extract_dir = out_dir.join(format!("{}_objs", lib_name));
-    fs::create_dir_all(&extract_dir).expect("Failed to create extract dir");
+    // Extract all object files from the archive
+    // This is necessary because ld -r -all_load on macOS doesn't preserve all symbols correctly
+    fs::create_dir_all(&temp_obj_dir).expect("Failed to create temp object directory");
 
-    // Convert to absolute path before changing directory (needed for macOS ar)
-    let static_lib_abs = std::fs::canonicalize(static_lib)
-        .expect("Failed to resolve absolute path for static library");
+    // Convert static_lib to absolute path for ar extraction
+    let static_lib_abs = if static_lib.is_absolute() {
+        static_lib.to_path_buf()
+    } else {
+        env::current_dir()
+            .expect("Failed to get current directory")
+            .join(static_lib)
+    };
 
     let extract_status = Command::new("ar")
-        .arg("-x")
+        .arg("x")
         .arg(&static_lib_abs)
-        .current_dir(&extract_dir)
+        .current_dir(&temp_obj_dir)
         .status()
-        .expect("Failed to extract archive");
-    assert!(extract_status.success(), "ar -x failed");
+        .expect("Failed to run ar extract");
 
-    // Get all symbols from the extracted object files
-    let mut all_symbols = Vec::new();
-    for entry in fs::read_dir(&extract_dir).expect("Failed to read extract dir") {
-        let entry = entry.expect("Failed to read dir entry");
-        let path = entry.path();
-
-        if !path.is_file() || path.file_name().unwrap() == "__.SYMDEF" {
-            continue;
-        }
-
-        let nm_out = Command::new("xcrun")
-            .arg("nm")
-            .args(["-g", "-U"])
-            .arg(&path)
-            .output()
-            .expect("Failed to run xcrun nm");
-
-        if nm_out.status.success() {
-            let symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
-                .lines()
-                .filter_map(|line| {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 && parts[1].chars().any(|c| c.is_uppercase()) {
-                        Some(parts[2].to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            all_symbols.extend(symbols);
-        }
+    if !extract_status.success() {
+        panic!("ar extract failed");
     }
 
-    // Remove duplicates
-    all_symbols.sort();
-    all_symbols.dedup();
+    // Collect all extracted object files
+    let obj_files: Vec<_> = fs::read_dir(&temp_obj_dir)
+        .expect("Failed to read temp object directory")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("o") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    // Now create the intermediate object with ld -r
+    if obj_files.is_empty() {
+        panic!("No object files found in archive");
+    }
+
+    // Create the intermediate object with ld -r, linking all extracted object files
     // Use xcrun to ensure we get the right ld that supports the target architecture
-    let output = Command::new("xcrun")
+    let mut ld_cmd = Command::new("xcrun");
+    ld_cmd
         .arg("ld")
         .arg("-arch")
         .arg(arch)
@@ -934,17 +999,48 @@ fn patch_macos(
         .arg(if arch == "arm64" { "11.0" } else { "10.13" })
         .arg("14.0")
         .arg("-o")
-        .arg(&intermediate)
-        .arg("-all_load")
-        .arg(static_lib)
-        .output()
-        .expect("Failed to run xcrun ld");
+        .arg(&intermediate);
+
+    for obj in &obj_files {
+        ld_cmd.arg(obj);
+    }
+
+    let output = ld_cmd.output().expect("Failed to run xcrun ld");
 
     if !output.status.success() {
         eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
         eprintln!("ld stdout: {}", String::from_utf8_lossy(&output.stdout));
         panic!("ld -r failed");
     }
+
+    // Now get all symbols from the intermediate object (after linking)
+    let nm_out = Command::new("xcrun")
+        .arg("nm")
+        .args(["-g", "-U"])
+        .arg(&intermediate)
+        .output()
+        .expect("Failed to run xcrun nm");
+
+    if !nm_out.status.success() {
+        eprintln!("nm stderr: {}", String::from_utf8_lossy(&nm_out.stderr));
+        panic!("nm failed on intermediate object");
+    }
+
+    let mut all_symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && parts[1].chars().any(|c| c.is_uppercase()) {
+                Some(parts[2].to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Remove duplicates
+    all_symbols.sort();
+    all_symbols.dedup();
 
     // Filter symbols based on mode
     let symbols_to_keep: Vec<String> = match mode {
@@ -1010,7 +1106,7 @@ fn patch_macos(
     fs::remove_file(&intermediate).ok();
     fs::remove_file(&final_obj).ok();
     fs::remove_file(&symbols_file).ok();
-    fs::remove_dir_all(&extract_dir).ok();
+    fs::remove_dir_all(&temp_obj_dir).ok();
 }
 
 // Linux/Android: Use ld -r + objcopy
