@@ -75,7 +75,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd tests\c-consumer
-          cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib
+          lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
+          cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
           .\testlib-test.exe
         shell: cmd
 
