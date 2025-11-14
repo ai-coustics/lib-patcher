@@ -101,6 +101,10 @@ pub fn patch_lib(
         }
     });
 
+    // Detect architecture from the library file
+    let detected_arch = detect_archive_arch(static_lib);
+    let final_arch = target_arch.map(|s| s.to_string()).unwrap_or(detected_arch);
+
     match target_os.as_str() {
         "windows" => patch_windows(
             static_lib,
@@ -108,7 +112,7 @@ pub fn patch_lib(
             lib_name,
             symbols_to_hide,
             final_lib,
-            target_arch,
+            &final_arch,
         ),
         "macos" | "ios" => patch_macos(
             static_lib,
@@ -116,7 +120,7 @@ pub fn patch_lib(
             lib_name,
             symbols_to_hide,
             final_lib,
-            target_arch,
+            &final_arch,
         ),
         _ => patch_linux(
             static_lib,
@@ -124,7 +128,7 @@ pub fn patch_lib(
             lib_name,
             symbols_to_hide,
             final_lib,
-            target_arch,
+            &final_arch,
         ),
     }
 
@@ -144,7 +148,7 @@ fn patch_windows(
     lib_name: &str,
     symbols_to_hide: &[String],
     final_lib: &Path,
-    target_arch: Option<&str>,
+    target_arch: &str,
 ) {
     let temp_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
@@ -180,7 +184,7 @@ fn patch_windows(
     }
 
     // Determine which library tool to use and the machine type
-    let lib_cmd = get_windows_lib_tool(target_arch);
+    let lib_cmd = get_windows_lib_tool(Some(target_arch));
 
     // Create library
     // Convert final_lib to absolute path before changing directory
@@ -377,13 +381,6 @@ fn patch_coff_symbol_table(
         return Ok(data);
     }
 
-    eprintln!(
-        "DEBUG: symbol_table_offset={}, symbol_count={}, data.len()={}",
-        symbol_table_offset,
-        symbol_count,
-        data.len()
-    );
-
     // Validate bounds
     let symbol_table_end = symbol_table_offset + (symbol_count * 18);
     if symbol_table_end > data.len() {
@@ -501,13 +498,6 @@ fn patch_coff_bigobj_symbol_table(
         return Ok(data);
     }
 
-    eprintln!(
-        "DEBUG BIGOBJ: symbol_table_offset={}, symbol_count={}, data.len()={}",
-        symbol_table_offset,
-        symbol_count,
-        data.len()
-    );
-
     // Big obj format uses 20-byte symbol entries (instead of 18)
     let symbol_table_end = symbol_table_offset + (symbol_count * 20);
     if symbol_table_end > data.len() {
@@ -608,6 +598,53 @@ fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::e
     Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
 }
 
+/// Detects the architecture of a static library by examining the first object file
+/// Works for all platforms: macOS (Mach-O), Linux (ELF), Windows (COFF/PE)
+fn detect_archive_arch(static_lib: &Path) -> String {
+    use std::io::Read;
+
+    let archive_file = match fs::File::open(static_lib) {
+        Ok(f) => f,
+        Err(_) => {
+            eprintln!(
+                "Warning: Could not open library file for architecture detection, defaulting to x86_64"
+            );
+            return "x86_64".to_string();
+        }
+    };
+
+    let mut archive = ar::Archive::new(archive_file);
+
+    // Read the first object file to detect architecture
+    while let Some(Ok(mut entry)) = archive.next_entry() {
+        let mut data = Vec::new();
+        if entry.read_to_end(&mut data).is_err() {
+            continue;
+        }
+
+        // Try to parse as object file (works for Mach-O, ELF, and COFF)
+        if let Ok(file) = File::parse(&*data) {
+            use object::Architecture;
+            let arch_str = match file.architecture() {
+                Architecture::Aarch64 => "aarch64",
+                Architecture::X86_64 => "x86_64",
+                Architecture::I386 => "x86",
+                Architecture::Arm => "arm",
+                Architecture::Riscv64 => "riscv64",
+                Architecture::PowerPc64 => "powerpc64",
+                Architecture::S390x => "s390x",
+                _ => "x86_64", // default fallback
+            };
+            eprintln!("Detected architecture from library: {}", arch_str);
+            return arch_str.to_string();
+        }
+    }
+
+    // If we can't detect, warn and default to x86_64
+    eprintln!("Warning: Could not detect architecture from library, defaulting to x86_64");
+    "x86_64".to_string()
+}
+
 // macOS/iOS: Use ld -r with exported_symbols_list
 fn patch_macos(
     static_lib: &Path,
@@ -615,21 +652,10 @@ fn patch_macos(
     lib_name: &str,
     symbols_to_hide: &[String],
     final_lib: &Path,
-    target_arch: Option<&str>,
+    target_arch: &str,
 ) {
-    // Determine target architecture from parameter, env var, or host detection
-    let target_arch_str = target_arch
-        .map(|s| s.to_string())
-        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
-        .unwrap_or_else(|| {
-            // Fall back to detecting the current architecture
-            if cfg!(target_arch = "aarch64") {
-                "aarch64".to_string()
-            } else {
-                "x86_64".to_string()
-            }
-        });
-    let arch = match target_arch_str.as_str() {
+    // Map Rust architecture names to macOS ld names
+    let arch = match target_arch {
         "aarch64" | "arm64" => "arm64",
         "x86_64" => "x86_64",
         a => a,
@@ -702,9 +728,14 @@ fn patch_macos(
 
     let output = ld_cmd.output().expect("Failed to run xcrun ld");
 
-    if !output.status.success() {
+    if !output.stderr.is_empty() {
         eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.stdout.is_empty() {
         eprintln!("ld stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    if !output.status.success() {
         panic!("ld -r failed");
     }
 
@@ -721,7 +752,9 @@ fn patch_macos(
         panic!("nm failed on intermediate object");
     }
 
-    let mut all_symbols: Vec<String> = String::from_utf8_lossy(&nm_out.stdout)
+    let nm_stdout = String::from_utf8_lossy(&nm_out.stdout);
+
+    let mut all_symbols: Vec<String> = nm_stdout
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -790,29 +823,10 @@ fn patch_linux(
     lib_name: &str,
     symbols_to_hide: &[String],
     final_lib: &Path,
-    target_arch: Option<&str>,
+    target_arch: &str,
 ) {
-    // Determine target architecture from parameter, env var, or host detection
-    let target_arch_str = target_arch
-        .map(|s| s.to_string())
-        .or_else(|| env::var("CARGO_CFG_TARGET_ARCH").ok())
-        .unwrap_or_else(|| {
-            // Fall back to detecting the current architecture
-            if cfg!(target_arch = "aarch64") {
-                "aarch64".to_string()
-            } else if cfg!(target_arch = "x86_64") {
-                "x86_64".to_string()
-            } else if cfg!(target_arch = "arm") {
-                "arm".to_string()
-            } else if cfg!(target_arch = "x86") {
-                "x86".to_string()
-            } else {
-                std::env::consts::ARCH.to_string()
-            }
-        });
-
     // Determine the appropriate binutils prefix for cross-compilation
-    let (ld_cmd, objcopy_cmd, ar_cmd) = get_linux_toolchain(&target_arch_str);
+    let (ld_cmd, objcopy_cmd, ar_cmd) = get_linux_toolchain(target_arch);
 
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let final_obj = out_dir.join(format!("{}_final.o", lib_name));
