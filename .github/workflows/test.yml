@@ -20,6 +20,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -72,9 +76,4 @@ jobs:
           cd tests/rust-consumer
           cargo +beta build --release
           cargo +beta run --release
-        shell: bash
-
-      - name: Success message
-        run: |
-          echo "✓ All integration tests passed on ${{ matrix.os }}!"
         shell: bash

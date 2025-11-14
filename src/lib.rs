@@ -160,8 +160,6 @@ fn patch_windows(
     final_lib: &Path,
     target_arch: Option<&str>,
 ) {
-    use std::io::Read;
-
     let temp_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
@@ -172,10 +170,10 @@ fn patch_windows(
     };
     let mut obj_files = Vec::new();
 
-    // Prefer using llvm-objcopy to localize symbols on COFF objects when in blocklist mode.
-    // This avoids directly mutating COFF symbol table bytes which can confuse link.exe.
-    let can_use_objcopy = matches!(mode, FilterMode::Blocklist { .. })
-        && Command::new("llvm-objcopy").arg("--version").output().is_ok();
+    // Note: llvm-objcopy --localize-symbol does not work correctly on Windows COFF files.
+    // The COFF format uses different symbol visibility mechanisms than ELF.
+    // We must use the manual COFF symbol table patching approach instead.
+    let can_use_objcopy = false;
 
     // Extract and patch each object file
     for member in archive.members() {
@@ -386,9 +384,7 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
                 host_arch, target_arch_str
             );
         } else {
-            eprintln!(
-                "Using llvm-ar for Windows build (warning: produces GNU ar archives)"
-            );
+            eprintln!("Using llvm-ar for Windows build (warning: produces GNU ar archives)");
         }
         return WindowsLibTool {
             tool: "llvm-ar".to_string(),
@@ -520,8 +516,6 @@ fn patch_coff_symbol_table(
 
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
-        // Keep COMDAT leader symbols global to preserve linker selection semantics
-        let is_comdat = comdat_symbols.contains(&i);
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
@@ -535,7 +529,10 @@ fn patch_coff_symbol_table(
             }),
         };
 
-        let keep_global = is_special || is_comdat || matches_filter;
+        // Keep COMDAT leader symbols global to preserve linker selection semantics,
+        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
+        let is_comdat = comdat_symbols.contains(&i);
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -643,7 +640,6 @@ fn patch_coff_bigobj_symbol_table(
         };
 
         let is_special = name.starts_with('@');
-        let is_comdat = comdat_symbols.contains(&i);
 
         let matches_filter = match mode {
             FilterMode::Allowlist { prefix } => name.starts_with(prefix),
@@ -657,7 +653,10 @@ fn patch_coff_bigobj_symbol_table(
             }),
         };
 
-        let keep_global = is_special || is_comdat || matches_filter;
+        // Keep COMDAT leader symbols global to preserve linker selection semantics,
+        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
+        let is_comdat = comdat_symbols.contains(&i);
+        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
