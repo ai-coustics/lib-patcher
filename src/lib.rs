@@ -940,12 +940,47 @@ fn patch_macos(
         a => a,
     };
 
+    let temp_obj_dir = out_dir.join(format!("{}_objs", lib_name));
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let symbols_file = out_dir.join("symbols.txt");
 
-    // First create the intermediate object with ld -r
+    // Extract all object files from the archive
+    // This is necessary because ld -r -all_load on macOS doesn't preserve all symbols correctly
+    fs::create_dir_all(&temp_obj_dir).expect("Failed to create temp object directory");
+
+    let extract_status = Command::new("ar")
+        .arg("x")
+        .arg(static_lib)
+        .current_dir(&temp_obj_dir)
+        .status()
+        .expect("Failed to run ar extract");
+
+    if !extract_status.success() {
+        panic!("ar extract failed");
+    }
+
+    // Collect all extracted object files
+    let obj_files: Vec<_> = fs::read_dir(&temp_obj_dir)
+        .expect("Failed to read temp object directory")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("o") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if obj_files.is_empty() {
+        panic!("No object files found in archive");
+    }
+
+    // Create the intermediate object with ld -r, linking all extracted object files
     // Use xcrun to ensure we get the right ld that supports the target architecture
-    let output = Command::new("xcrun")
+    let mut ld_cmd = Command::new("xcrun");
+    ld_cmd
         .arg("ld")
         .arg("-arch")
         .arg(arch)
@@ -955,11 +990,13 @@ fn patch_macos(
         .arg(if arch == "arm64" { "11.0" } else { "10.13" })
         .arg("14.0")
         .arg("-o")
-        .arg(&intermediate)
-        .arg("-all_load")
-        .arg(static_lib)
-        .output()
-        .expect("Failed to run xcrun ld");
+        .arg(&intermediate);
+
+    for obj in &obj_files {
+        ld_cmd.arg(obj);
+    }
+
+    let output = ld_cmd.output().expect("Failed to run xcrun ld");
 
     if !output.status.success() {
         eprintln!("ld stderr: {}", String::from_utf8_lossy(&output.stderr));
@@ -1060,6 +1097,7 @@ fn patch_macos(
     fs::remove_file(&intermediate).ok();
     fs::remove_file(&final_obj).ok();
     fs::remove_file(&symbols_file).ok();
+    fs::remove_dir_all(&temp_obj_dir).ok();
 }
 
 // Linux/Android: Use ld -r + objcopy
