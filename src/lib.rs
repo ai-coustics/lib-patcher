@@ -948,9 +948,18 @@ fn patch_macos(
     // This is necessary because ld -r -all_load on macOS doesn't preserve all symbols correctly
     fs::create_dir_all(&temp_obj_dir).expect("Failed to create temp object directory");
 
+    // Convert static_lib to absolute path for ar extraction
+    let static_lib_abs = if static_lib.is_absolute() {
+        static_lib.to_path_buf()
+    } else {
+        env::current_dir()
+            .expect("Failed to get current directory")
+            .join(static_lib)
+    };
+
     let extract_status = Command::new("ar")
         .arg("x")
-        .arg(static_lib)
+        .arg(&static_lib_abs)
         .current_dir(&temp_obj_dir)
         .status()
         .expect("Failed to run ar extract");
