@@ -33,11 +33,19 @@ jobs:
       - name: Build lib-patcher CLI
         run: cargo build --release
 
-      - name: Build testlib static library
+      - name: Build testlib static library (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           cd tests/testlib
           cargo +stable build --release
         shell: bash
+
+      - name: Build testlib static library (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd tests/testlib
+          cargo +stable build --release
+        shell: pwsh
 
       - name: Patch testlib (Linux/macOS)
         if: runner.os != 'Windows'
