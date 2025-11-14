@@ -36,12 +36,6 @@ struct Args {
     #[arg(short, long, value_name = "DIR")]
     temp_dir: Option<PathBuf>,
 
-    /// Target architecture (e.g., "aarch64", "x86_64", "arm64")
-    /// If not specified, uses the current host architecture.
-    /// On Linux, this enables cross-architecture patching (requires cross-compilation tools).
-    #[arg(short = 'a', long, value_name = "ARCH")]
-    arch: Option<String>,
-
     /// List all public/global symbols in the input library instead of patching
     #[arg(short = 'l', long)]
     list: bool,
@@ -119,9 +113,6 @@ fn main() {
             println!("          {}", symbols.join(", "));
         }
     }
-    if let Some(ref arch_val) = args.arch {
-        println!("  Arch:   {} (cross-compilation mode)", arch_val);
-    }
     println!("  Temp:   {}", temp_dir.display());
 
     patch_lib(
@@ -130,7 +121,7 @@ fn main() {
         &args.name,
         &symbols,
         &output,
-        args.arch.as_deref(),
+        None, // Architecture is now auto-detected
     );
 
     println!("✓ Successfully patched library!");
