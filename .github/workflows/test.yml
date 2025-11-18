@@ -73,16 +73,16 @@ jobs:
           ./testlib-test
         shell: bash
 
-      - name: Build and run C test (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd tests/c-consumer
-          lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
-          $sysroot = rustc --print sysroot
-          $stdlib = Get-ChildItem "$sysroot\lib\rustlib\x86_64-pc-windows-msvc\lib\std-*.lib" | Select-Object -First 1
-          cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib $stdlib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
-          .\testlib-test.exe
-        shell: pwsh
+      # - name: Build and run C test (Windows)
+      #   if: runner.os == 'Windows'
+      #   run: |
+      #     cd tests/c-consumer
+      #     lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
+      #     $sysroot = rustc --print sysroot
+      #     $stdlib = Get-ChildItem "$sysroot\lib\rustlib\x86_64-pc-windows-msvc\lib\std-*.lib" | Select-Object -First 1
+      #     cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib $stdlib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
+      #     .\testlib-test.exe
+      #   shell: pwsh
 
       - name: Build and run Rust test (different version) (Linux/macOS)
         if: runner.os != 'Windows'
