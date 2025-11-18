@@ -207,6 +207,12 @@ fn patch_coff_object(
         let should_keep = name.starts_with(keep_prefix)
             || name.starts_with("DW.ref.")
             || name.starts_with('@') // Special symbols
+            || name.starts_with("__imp_") // Import symbols (Windows API/CRT)
+            || name.starts_with("_imp_") // Alternative import symbol prefix
+            || name == "__ImageBase" // Special linker symbol
+            || name == "___chkstk_ms" // Stack check function
+            || name == "__security_cookie" // Security cookie
+            || name == "__security_check_cookie" // Security check
             || (is_comdat && name.starts_with("DW.")); // Keep COMDAT DWARF symbols
 
         if !should_keep {
@@ -295,6 +301,12 @@ fn patch_coff_bigobj(
         let should_keep = name.starts_with(keep_prefix)
             || name.starts_with("DW.ref.")
             || name.starts_with('@')
+            || name.starts_with("__imp_") // Import symbols (Windows API/CRT)
+            || name.starts_with("_imp_") // Alternative import symbol prefix
+            || name == "__ImageBase" // Special linker symbol
+            || name == "___chkstk_ms" // Stack check function
+            || name == "__security_cookie" // Security cookie
+            || name == "__security_check_cookie" // Security check
             || (is_comdat && name.starts_with("DW."));
 
         if !should_keep {
