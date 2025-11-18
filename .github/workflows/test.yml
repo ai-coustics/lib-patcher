@@ -52,7 +52,8 @@ jobs:
         run: |
           ./target/release/lib-patcher \
             --input tests/testlib/target/release/libtestlib.a \
-            --output tests/testlib/target/release/libtestlib_patched.a
+            --output tests/testlib/target/release/libtestlib_patched.a \
+            --keep-prefix testlib_
         shell: bash
 
       - name: Patch testlib (Windows)
@@ -60,7 +61,8 @@ jobs:
         run: |
           .\target\release\lib-patcher.exe `
             --input tests\testlib\target\release\testlib.lib `
-            --output tests\testlib\target\release\testlib_patched.lib
+            --output tests\testlib\target\release\testlib_patched.lib `
+            --keep-prefix testlib_
         shell: pwsh
 
       - name: Build and run C test (Linux/macOS)
@@ -94,4 +96,20 @@ jobs:
           cd tests/rust-consumer
           cargo +beta build --release
           cargo +beta run --release
+        shell: pwsh
+
+      - name: Build and run Rust test (same version) (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd tests/rust-consumer-stable
+          cargo +stable build --release
+          cargo +stable run --release
+        shell: bash
+
+      - name: Build and run Rust test (same version) (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd tests/rust-consumer-stable
+          cargo +stable build --release
+          cargo +stable run --release
         shell: pwsh

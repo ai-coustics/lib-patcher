@@ -1,10 +1,10 @@
 use clap::Parser;
-use lib_patcher::{default_symbol_blocklist, list_symbols, patch_lib};
+use lib_patcher::{list_symbols, patch_lib};
 use std::path::PathBuf;
 
 /// Symbol filtering tool for cross-platform static libraries
 ///
-/// This tool hides specific symbols in static libraries to prevent linking conflicts
+/// Hides all symbols except those with a specified prefix to prevent linking conflicts
 /// when linking multiple Rust static libraries together.
 #[derive(Parser, Debug)]
 #[command(name = "lib-patcher")]
@@ -19,14 +19,16 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Symbols to hide (comma-separated)
-    /// If not specified, uses default blocklist of common Rust stdlib symbols:
-    /// rust_eh_personality, __rust_alloc, __rust_dealloc, __rust_realloc,
-    /// __rust_alloc_zeroed, __rust_alloc_error_handler, __rust_no_alloc_shim_is_unstable
-    ///
-    /// Example: "rust_eh_personality,my_symbol,__rust_alloc"
-    #[arg(short = 's', long, value_name = "SYMBOLS", value_delimiter = ',')]
-    symbols: Option<Vec<String>>,
+    /// Keep only symbols with this prefix, hide everything else
+    /// Example: --keep-prefix "mylib_" will keep mylib_add, mylib_multiply public
+    /// and hide all other symbols including Rust stdlib and dependencies.
+    #[arg(
+        short = 'k',
+        long,
+        value_name = "PREFIX",
+        required_unless_present = "list"
+    )]
+    keep_prefix: Option<String>,
 
     /// Base name for temporary files (e.g., "mylib")
     #[arg(short, long, value_name = "NAME", default_value = "lib")]
@@ -74,7 +76,7 @@ fn main() {
         return;
     }
 
-    // Patching mode - output is required
+    // Patching mode - output and prefix are required
     let output = match args.output {
         Some(path) => path,
         None => {
@@ -83,49 +85,28 @@ fn main() {
         }
     };
 
-    // Use provided symbols or default blocklist
-    let is_default = args.symbols.is_none();
-    let symbols = if let Some(symbols) = args.symbols {
-        if symbols.is_empty() {
-            eprintln!("Error: Symbols list cannot be empty");
-            std::process::exit(1);
-        }
-        symbols
-    } else {
-        default_symbol_blocklist()
-    };
+    let keep_prefix = args.keep_prefix.expect("--keep-prefix is required");
 
     let temp_dir = get_temp_dir(args.temp_dir);
 
     println!("Patching static library:");
-    println!("  Input:  {}", args.input.display());
-    println!("  Output: {}", output.display());
-
-    if is_default {
-        println!(
-            "  Hiding: {} symbols (default Rust stdlib symbols)",
-            symbols.len()
-        );
-        println!("          rust_eh_personality, __rust_alloc, __rust_dealloc, ...");
-    } else {
-        println!("  Hiding: {} symbols", symbols.len());
-        if symbols.len() <= 5 {
-            println!("          {}", symbols.join(", "));
-        }
-    }
-    println!("  Temp:   {}", temp_dir.display());
+    println!("  Input:   {}", args.input.display());
+    println!("  Output:  {}", output.display());
+    println!("  Keeping: Symbols starting with '{}'", keep_prefix);
+    println!("  Hiding:  Everything else (Rust stdlib, dependencies, internal symbols)");
+    println!("  Temp:    {}", temp_dir.display());
 
     patch_lib(
         &args.input,
         &temp_dir,
         &args.name,
-        &symbols,
+        &keep_prefix,
         &output,
-        None, // Architecture is now auto-detected
+        None, // Architecture is auto-detected
     );
 
     println!("✓ Successfully patched library!");
-    println!("  {} symbols are now hidden.", symbols.len());
+    println!("  All symbols except '{}*' are now hidden.", keep_prefix);
 }
 
 fn get_temp_dir(temp_dir: Option<PathBuf>) -> PathBuf {
