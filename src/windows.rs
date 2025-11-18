@@ -180,6 +180,16 @@ fn patch_coff_object(
             continue;
         }
 
+        // Get section number to check if symbol is defined
+        let section_number =
+            i16::from_le_bytes([data[symbol_offset + 12], data[symbol_offset + 13]]);
+
+        // Skip undefined symbols (section_number == 0 means IMAGE_SYM_UNDEFINED)
+        // We only want to localize DEFINED symbols, not external references
+        if section_number == 0 {
+            continue;
+        }
+
         // Get symbol name
         let symbol_entry = &data[symbol_offset..symbol_offset + 18];
         let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
@@ -272,6 +282,19 @@ fn patch_coff_bigobj(
         let storage_class = data[symbol_offset + 18];
 
         if storage_class != 2 {
+            continue;
+        }
+
+        // Get section number (4 bytes in bigobj format, at offset 12-15)
+        let section_number = i32::from_le_bytes([
+            data[symbol_offset + 12],
+            data[symbol_offset + 13],
+            data[symbol_offset + 14],
+            data[symbol_offset + 15],
+        ]);
+
+        // Skip undefined symbols (section_number == 0 means IMAGE_SYM_UNDEFINED)
+        if section_number == 0 {
             continue;
         }
 
