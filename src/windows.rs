@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::File;
-use object::{Object as ObjectTrait, ObjectComdat};
+use object::{Object as ObjectTrait, ObjectSymbol};
 
 pub(crate) struct WindowsLibTool {
     pub tool: String,
@@ -13,7 +14,7 @@ pub(crate) struct WindowsLibTool {
     pub is_llvm: bool,
 }
 
-/// Windows implementation: Patches COFF symbol tables directly
+/// Windows implementation: Renames symbols using llvm-objcopy on extracted objects
 pub(crate) fn patch_windows(
     static_lib: &Path,
     out_dir: &Path,
@@ -25,7 +26,7 @@ pub(crate) fn patch_windows(
     let temp_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-    eprintln!("Reading archive and patching COFF objects...");
+    eprintln!("Reading archive...");
     let archive_bytes = fs::read(static_lib).expect("Failed to read static lib");
     let archive = match object::read::archive::ArchiveFile::parse(&*archive_bytes) {
         Ok(a) => a,
@@ -33,35 +34,110 @@ pub(crate) fn patch_windows(
     };
 
     let mut obj_files = Vec::new();
+    let mut defined_symbols = HashSet::new();
 
-    // Extract and patch each object file
+    // Step 1: Extract objects and collect defined symbols
+    eprintln!("Extracting objects and scanning symbols...");
     for member in archive.members() {
         let member = member.expect("Failed to read archive member");
         let data = member
             .data(archive_bytes.as_slice())
             .expect("Failed to read member data");
 
-        let idx = obj_files.len();
+        let name = String::from_utf8_lossy(member.name());
+        if name == "/" || name == "//" {
+            continue;
+        }
 
-        // Patch the COFF object file
-        match patch_coff_object(&data, keep_prefix) {
-            Ok(patched_data) => {
-                let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
-                fs::write(&patched_path, patched_data).expect("Failed to write patched object");
-                obj_files.push(patched_path);
-            }
-            Err(e) => {
-                eprintln!("Warning: Skipping object ({})", e);
+        let idx = obj_files.len();
+        let obj_path = temp_dir.join(format!("{}.obj", idx));
+        fs::write(&obj_path, data).expect("Failed to write object file");
+        obj_files.push(obj_path);
+
+        // Parse object file to find defined symbols
+        if let Ok(file) = File::parse(data) {
+            for symbol in file.symbols() {
+                if symbol.is_global() && !symbol.is_undefined() {
+                    if let Ok(name) = symbol.name() {
+                        defined_symbols.insert(name.to_string());
+                    }
+                }
             }
         }
     }
 
-    eprintln!("Creating final library from {} objects...", obj_files.len());
+    eprintln!("Extracted {} objects.", obj_files.len());
+    eprintln!("Found {} defined symbols.", defined_symbols.len());
 
-    // Determine which library tool to use
+    // Step 2: Generate renames
+    let mut renames = Vec::new();
+    let mut kept_count = 0;
+    let mut renamed_count = 0;
+
+    for symbol in defined_symbols {
+        if symbol.starts_with(keep_prefix) {
+            kept_count += 1;
+            continue;
+        }
+
+        // Skip special compiler symbols (heuristic)
+        // We MUST rename .weak symbols to avoid LNK2005 conflicts
+        if symbol.starts_with("??") {
+             continue;
+        }
+
+        let new_name = format!("{}{}", keep_prefix, symbol);
+        renames.push(format!("{} {}", symbol, new_name));
+        renamed_count += 1;
+    }
+
+    eprintln!(
+        "Renaming {} symbols (kept {} already prefixed).",
+        renamed_count, kept_count
+    );
+
+    if renames.is_empty() {
+        eprintln!("No symbols to rename. Copying file...");
+        fs::copy(static_lib, final_lib).expect("Failed to copy library");
+        return;
+    }
+
+    let renames_path = temp_dir.join("renames.txt");
+    let mut f = fs::File::create(&renames_path).expect("Failed to create renames file");
+    for line in renames {
+        writeln!(f, "{}", line).expect("Failed to write rename line");
+    }
+
+    // Step 3: Run llvm-objcopy on EACH object
+    let objcopy = find_objcopy_tool();
+    eprintln!("Using objcopy: {}", objcopy.display());
+    eprintln!("Renaming symbols in objects...");
+
+    let mut patched_files = Vec::new();
+
+    for (i, obj_path) in obj_files.iter().enumerate() {
+        let patched_path = temp_dir.join(format!("{}_patched.obj", i));
+        
+        let status = Command::new(&objcopy)
+            .arg(format!("--redefine-syms={}", renames_path.display()))
+            .arg(obj_path)
+            .arg(&patched_path)
+            .status()
+            .expect("Failed to execute llvm-objcopy");
+
+        if !status.success() {
+            eprintln!("Warning: llvm-objcopy failed on object {}. Skipping.", i);
+            // Fallback: use original object if patch fails (might be non-COFF or weird)
+            patched_files.push(obj_path.clone());
+        } else {
+            patched_files.push(patched_path);
+        }
+    }
+
+    // Step 4: Repackage
+    eprintln!("Creating final library...");
+
     let lib_cmd = get_windows_lib_tool(Some(target_arch));
-
-    // Convert final_lib to absolute path
     let final_lib_abs = if final_lib.is_absolute() {
         final_lib.to_path_buf()
     } else {
@@ -75,12 +151,8 @@ pub(crate) fn patch_windows(
     if lib_cmd.is_llvm {
         cmd.arg("rc");
         cmd.arg(&final_lib_abs);
-        cmd.current_dir(&temp_dir);
-
-        for obj in &obj_files {
-            if let Some(filename) = obj.file_name() {
-                cmd.arg(filename);
-            }
+        for obj in &patched_files {
+            cmd.arg(obj);
         }
     } else {
         cmd.arg("/nologo");
@@ -88,12 +160,8 @@ pub(crate) fn patch_windows(
             cmd.arg(format!("/MACHINE:{}", machine));
         }
         cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
-        cmd.current_dir(&temp_dir);
-
-        for obj in &obj_files {
-            if let Some(filename) = obj.file_name() {
-                cmd.arg(filename);
-            }
+        for obj in &patched_files {
+            cmd.arg(obj);
         }
     }
 
@@ -105,214 +173,41 @@ pub(crate) fn patch_windows(
     });
 
     if !status.success() {
-        eprintln!(
-            "ERROR: {} failed with exit code: {:?}",
-            lib_cmd.tool,
-            status.code()
-        );
-        eprintln!("Temp directory kept for debugging: {}", temp_dir.display());
-        panic!("{} failed", lib_cmd.tool);
+        panic!("{} failed with exit code: {:?}", lib_cmd.tool, status.code());
     }
 
-    eprintln!("Temp directory: {}", temp_dir.display());
-    eprintln!("✓ Windows patching complete");
+    eprintln!("✓ Windows patching complete (via renaming)");
 }
 
-fn patch_coff_object(
-    data: &[u8],
-    keep_prefix: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use object::LittleEndian as LE;
-    use object::pe;
-    use object::read::coff::CoffHeader;
+fn find_objcopy_tool() -> PathBuf {
+    if let Ok(path) = which::which("llvm-objcopy") { return path; }
+    if let Ok(path) = which::which("rust-objcopy") { return path; }
 
-    let mut data = data.to_vec();
+    let vs_llvm_paths = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\llvm-objcopy.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin\llvm-objcopy.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\llvm-objcopy.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin\llvm-objcopy.exe",
+    ];
 
-    // Check if this is big obj format
-    let is_bigobj = data.len() >= 4 && data[0..2] == [0x00, 0x00] && data[2..4] == [0xFF, 0xFF];
-
-    if is_bigobj {
-        return patch_coff_bigobj(data, keep_prefix);
+    for path_str in &vs_llvm_paths {
+        let path = PathBuf::from(path_str);
+        if path.exists() { return path; }
     }
 
-    let mut offset = 0u64;
-    let header = pe::ImageFileHeader::parse(&data[..], &mut offset)?;
-
-    let symbol_table_offset = header.pointer_to_symbol_table.get(LE) as usize;
-    let symbol_count = header.number_of_symbols.get(LE) as usize;
-
-    if symbol_table_offset == 0 || symbol_count == 0 {
-        return Ok(data);
-    }
-
-    let symbol_table_end = symbol_table_offset + (symbol_count * 18);
-    if symbol_table_end > data.len() {
-        return Err(format!(
-            "Symbol table extends beyond file: {} > {}",
-            symbol_table_end,
-            data.len()
-        )
-        .into());
-    }
-
-    let string_table_offset = symbol_table_end;
-
-    // Collect COMDAT symbols
-    let file = File::parse(data.as_slice())?;
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
-
-    let mut modified_count = 0;
-
-    for i in 0..symbol_count {
-        let symbol_offset = symbol_table_offset + (i * 18);
-
-        if symbol_offset + 18 > data.len() {
-            return Err(format!("Symbol {} extends beyond file", i).into());
-        }
-
-        let storage_class = data[symbol_offset + 16];
-
-        // Only process EXTERNAL (global) symbols
-        if storage_class != 2 {
-            continue;
-        }
-
-        // Get symbol name
-        let symbol_entry = &data[symbol_offset..symbol_offset + 18];
-        let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
-            let string_offset = u32::from_le_bytes([
-                symbol_entry[4],
-                symbol_entry[5],
-                symbol_entry[6],
-                symbol_entry[7],
-            ]) as usize;
-            if string_table_offset + string_offset >= data.len() {
-                return Err(format!(
-                    "String table offset out of bounds: {}",
-                    string_table_offset + string_offset
-                )
-                .into());
+    if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
+        let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let sysroot_path = PathBuf::from(sysroot);
+        let rustlib = sysroot_path.join("lib").join("rustlib");
+        if let Ok(entries) = fs::read_dir(&rustlib) {
+            for entry in entries.flatten() {
+                let bin_objcopy = entry.path().join("bin").join("rust-objcopy.exe");
+                if bin_objcopy.exists() { return bin_objcopy; }
             }
-            read_coff_string(&data, string_table_offset + string_offset)?
-        } else {
-            let end = symbol_entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
-            String::from_utf8_lossy(&symbol_entry[0..end]).to_string()
-        };
-
-        // Determine if symbol should be kept
-        let is_comdat = comdat_symbols.contains(&i);
-        let should_keep = name.starts_with(keep_prefix)
-            || name.starts_with("DW.ref.")
-            || name.starts_with('@') // Special symbols
-            || (is_comdat && name.starts_with("DW.")); // Keep COMDAT DWARF symbols
-
-        if !should_keep {
-            // Change storage class to STATIC (local)
-            data[symbol_offset + 16] = 3;
-            modified_count += 1;
         }
     }
 
-    eprintln!("  Modified {} symbols in COFF object", modified_count);
-    Ok(data)
-}
-
-fn patch_coff_bigobj(
-    mut data: Vec<u8>,
-    keep_prefix: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if data.len() < 56 {
-        return Err("File too small for big obj format".into());
-    }
-
-    let symbol_table_offset = u32::from_le_bytes([data[48], data[49], data[50], data[51]]) as usize;
-    let symbol_count = u32::from_le_bytes([data[52], data[53], data[54], data[55]]) as usize;
-
-    if symbol_table_offset == 0 || symbol_count == 0 {
-        return Ok(data);
-    }
-
-    let symbol_table_end = symbol_table_offset + (symbol_count * 20);
-    if symbol_table_end > data.len() {
-        return Err(format!(
-            "Symbol table extends beyond file: {} > {}",
-            symbol_table_end,
-            data.len()
-        )
-        .into());
-    }
-
-    let string_table_offset = symbol_table_end;
-
-    // Collect COMDAT symbols
-    let file = File::parse(data.as_slice())?;
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
-
-    let mut modified_count = 0;
-
-    for i in 0..symbol_count {
-        let symbol_offset = symbol_table_offset + (i * 20);
-
-        if symbol_offset + 20 > data.len() {
-            return Err(format!("Symbol {} extends beyond file", i).into());
-        }
-
-        let storage_class = data[symbol_offset + 18];
-
-        if storage_class != 2 {
-            continue;
-        }
-
-        // Get symbol name
-        let symbol_entry = &data[symbol_offset..symbol_offset + 20];
-        let name = if symbol_entry[0..4] == [0, 0, 0, 0] {
-            let string_offset = u32::from_le_bytes([
-                symbol_entry[4],
-                symbol_entry[5],
-                symbol_entry[6],
-                symbol_entry[7],
-            ]) as usize;
-            if string_table_offset + string_offset >= data.len() {
-                return Err(format!(
-                    "String table offset out of bounds: {}",
-                    string_table_offset + string_offset
-                )
-                .into());
-            }
-            read_coff_string(&data, string_table_offset + string_offset)?
-        } else {
-            let end = symbol_entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
-            String::from_utf8_lossy(&symbol_entry[0..end]).to_string()
-        };
-
-        let is_comdat = comdat_symbols.contains(&i);
-        let should_keep = name.starts_with(keep_prefix)
-            || name.starts_with("DW.ref.")
-            || name.starts_with('@')
-            || (is_comdat && name.starts_with("DW."));
-
-        if !should_keep {
-            data[symbol_offset + 18] = 3; // STATIC
-            modified_count += 1;
-        }
-    }
-
-    eprintln!("  Modified {} symbols in bigobj", modified_count);
-    Ok(data)
-}
-
-fn read_coff_string(data: &[u8], offset: usize) -> Result<String, Box<dyn std::error::Error>> {
-    let end = data[offset..]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(data.len() - offset);
-    Ok(String::from_utf8_lossy(&data[offset..offset + end]).to_string())
+    panic!("Could not find 'llvm-objcopy' or 'rust-objcopy'.");
 }
 
 /// Determines the appropriate library tool for Windows
@@ -345,9 +240,9 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     };
 
     // Check if we're doing cross-architecture
-    let is_cross = target_arch_str != host_arch;
+    let _is_cross = target_arch_str != host_arch;
 
-    // Prefer MSVC lib.exe when available (produces COFF libraries accepted by link.exe)
+    // 1. Try finding lib.exe in PATH
     if Command::new("lib.exe").arg("/?").output().is_ok() {
         eprintln!("Using lib.exe for Windows build");
         return WindowsLibTool {
@@ -357,33 +252,39 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
         };
     }
 
-    // Next prefer llvm-lib (COFF-compatible, command-line compatible with lib.exe)
+    // 2. Try finding llvm-lib in PATH
     if Command::new("llvm-lib").arg("/?").output().is_ok() {
-        if is_cross {
-            eprintln!(
-                "Using llvm-lib for cross-architecture Windows build ({} -> {})",
-                host_arch, target_arch_str
-            );
-        } else {
-            eprintln!("Using llvm-lib for Windows build");
-        }
+        eprintln!("Using llvm-lib for Windows build");
         return WindowsLibTool {
             tool: "llvm-lib".to_string(),
             machine_type,
-            is_llvm: false, // llvm-lib uses lib.exe-style flags
+            is_llvm: false,
         };
     }
 
-    // Fall back to llvm-ar as a last resort
-    if Command::new("llvm-ar").arg("--version").output().is_ok() {
-        if is_cross {
-            eprintln!(
-                "Using llvm-ar for cross-architecture Windows build ({} -> {})",
-                host_arch, target_arch_str
-            );
-        } else {
-            eprintln!("Using llvm-ar for Windows build (warning: produces GNU ar archives)");
+    // 3. Look in Visual Studio LLVM locations for llvm-lib
+    let vs_llvm_paths = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin\llvm-lib.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+    ];
+
+    for path_str in &vs_llvm_paths {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            eprintln!("Using llvm-lib at {}", path.display());
+            return WindowsLibTool {
+                tool: path.to_string_lossy().to_string(),
+                machine_type,
+                is_llvm: false, // llvm-lib uses lib.exe flags
+            };
         }
+    }
+
+    // 5. Fall back to llvm-ar
+    if Command::new("llvm-ar").arg("--version").output().is_ok() {
+        eprintln!("Using llvm-ar for Windows build");
         return WindowsLibTool {
             tool: "llvm-ar".to_string(),
             machine_type,

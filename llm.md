@@ -12,7 +12,6 @@ The rust-consumer-stable is trying to use the patched library with the same rust
 The c-consumer is trying to use the patched library from a C project.
 
 All of those projects should work.
-You can check the CI pipeling in .github/workflows to see how exactly the tests run.
 
 Currently Linux and macOS work fine, but Windows has some issues. On Windows the tools work differnt so I don't know how to patch it.
 
