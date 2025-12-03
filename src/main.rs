@@ -28,6 +28,11 @@ struct Args {
     #[arg(short = 's', long, value_name = "SYMBOLS", value_delimiter = ',')]
     symbols: Option<Vec<String>>,
 
+    /// Include default symbol blocklist in addition to custom symbols
+    /// When used with --symbols, both the default list and custom symbols will be hidden
+    #[arg(short = 'd', long)]
+    default: bool,
+
     /// Base name for temporary files (e.g., "mylib")
     #[arg(short, long, value_name = "NAME", default_value = "lib")]
     name: String,
@@ -83,16 +88,33 @@ fn main() {
         }
     };
 
-    // Use provided symbols or default blocklist
+    // Store flags before consuming args.symbols
     let is_default = args.symbols.is_none();
-    let symbols = if let Some(symbols) = args.symbols {
-        if symbols.is_empty() {
-            eprintln!("Error: Symbols list cannot be empty");
-            std::process::exit(1);
+    let has_custom = args.symbols.is_some();
+    let has_default = args.default || args.symbols.is_none();
+    
+    // Build symbols list based on --symbols and --default flags
+    let symbols = match (args.symbols, args.default) {
+        // Only custom symbols provided
+        (Some(custom), false) => {
+            if custom.is_empty() {
+                eprintln!("Error: Symbols list cannot be empty");
+                std::process::exit(1);
+            }
+            custom
         }
-        symbols
-    } else {
-        default_symbol_blocklist()
+        // Both custom symbols and default requested
+        (Some(custom), true) => {
+            if custom.is_empty() {
+                eprintln!("Error: Symbols list cannot be empty");
+                std::process::exit(1);
+            }
+            let mut merged = default_symbol_blocklist();
+            merged.extend(custom);
+            merged
+        }
+        // No symbols provided, use default
+        (None, _) => default_symbol_blocklist(),
     };
 
     let temp_dir = get_temp_dir(args.temp_dir);
@@ -107,8 +129,14 @@ fn main() {
             symbols.len()
         );
         println!("          rust_eh_personality, __rust_alloc, __rust_dealloc, ...");
+    } else if has_custom && has_default {
+        println!(
+            "  Hiding: {} symbols (default + custom)",
+            symbols.len()
+        );
+        println!("          default + custom symbols combined");
     } else {
-        println!("  Hiding: {} symbols", symbols.len());
+        println!("  Hiding: {} symbols (custom)", symbols.len());
         if symbols.len() <= 5 {
             println!("          {}", symbols.join(", "));
         }
