@@ -1014,6 +1014,51 @@ fn verify_patched_lib(
     Ok(())
 }
 
+/// Filters symbols from a static library by prefix.
+///
+/// Returns all public symbols that start with any of the given prefixes.
+///
+/// # Arguments
+///
+/// * `static_lib` - Path to the static library (e.g., `libmylib.a`, `mylib.lib`)
+/// * `prefixes` - List of prefixes to filter by
+///
+/// # Returns
+///
+/// A Result containing a sorted Vec of symbol names that match any prefix.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use lib_patcher::filter_symbols_by_prefix;
+/// use std::path::Path;
+///
+/// let prefixes = vec!["_Z".to_string(), "rust_".to_string()];
+/// let symbols = filter_symbols_by_prefix(Path::new("libmylib.a"), &prefixes).unwrap();
+/// for sym in symbols {
+///     println!("{}", sym);
+/// }
+/// ```
+pub fn filter_symbols_by_prefix(
+    static_lib: &Path,
+    prefixes: &[String],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let all_symbols = list_symbols(static_lib)?;
+    
+    let filtered: Vec<String> = all_symbols
+        .into_iter()
+        .filter(|sym| {
+            prefixes.iter().any(|prefix| {
+                // Strip leading underscore for macOS compatibility
+                let sym_without_underscore = sym.strip_prefix('_').unwrap_or(sym);
+                sym.starts_with(prefix) || sym_without_underscore.starts_with(prefix)
+            })
+        })
+        .collect();
+    
+    Ok(filtered)
+}
+
 /// Lists all public/global symbols in a static library
 ///
 /// # Arguments
