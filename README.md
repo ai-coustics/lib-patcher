@@ -43,15 +43,29 @@ lib-patcher \
   --input vendor/lib2.a \
   --output vendor/lib2_patched.a \
   --symbols "rust_eh_personality,my_conflict,__rust_alloc"
+
+# Filter by prefix (hides all symbols starting with the given prefixes)
+lib-patcher \
+  --input vendor/lib3.a \
+  --output vendor/lib3_patched.a \
+  --filter-prefix "_ZN,__rust,rust_"
+
+# Combine default + prefix filtering
+lib-patcher \
+  --input vendor/lib4.a \
+  --output vendor/lib4_patched.a \
+  --default \
+  --filter-prefix "_ZN100,_ZN101"
 ```
 
 **Options:**
 - `--input, -i`: Path to input static library (required)
 - `--output, -o`: Path to output patched library (required)
 - `--symbols, -s`: Comma-separated list of symbols to hide (optional, defaults to stdlib symbols)
+- `--filter-prefix, -f`: Comma-separated list of prefixes; hides all symbols starting with these prefixes
+- `--default, -d`: Include default blocklist in addition to custom symbols/prefixes
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
 - `--temp-dir, -t`: Directory for temporary files (optional)
-- `--arch, -a`: Target architecture for cross-compilation (optional)
 - `--list, -l`: List all public symbols instead of patching
 
 **Default blocklist includes:**
@@ -70,7 +84,7 @@ lib-patcher --input libmylib.a --list
 You can also use it programmatically in your `build.rs`:
 
 ```rust
-use lib_patcher::{patch_lib, default_symbol_blocklist};
+use lib_patcher::{patch_lib, default_symbol_blocklist, filter_symbols_by_prefix};
 use std::env;
 use std::path::Path;
 
@@ -98,6 +112,39 @@ fn main() {
         "lib2",
         &symbols,
         Path::new("lib2_patched.a"),
+        None,
+    );
+
+    // Filter by prefix (hides all symbols starting with the given prefixes)
+    let prefixes = vec!["_ZN".to_string(), "__rust".to_string()];
+    let filtered_symbols = filter_symbols_by_prefix(
+        Path::new("vendor/lib3.a"),
+        &prefixes
+    ).unwrap();
+    
+    patch_lib(
+        Path::new("vendor/lib3.a"),
+        Path::new(&out_dir),
+        "lib3",
+        &filtered_symbols,
+        Path::new("lib3_patched.a"),
+        None,
+    );
+
+    // Combine default + prefix filtering
+    let mut combined = default_symbol_blocklist();
+    let prefix_filtered = filter_symbols_by_prefix(
+        Path::new("vendor/lib4.a"),
+        &vec!["_ZN100".to_string()]
+    ).unwrap();
+    combined.extend(prefix_filtered);
+    
+    patch_lib(
+        Path::new("vendor/lib4.a"),
+        Path::new(&out_dir),
+        "lib4",
+        &combined,
+        Path::new("lib4_patched.a"),
         None,
     );
 
