@@ -41,6 +41,8 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 /// * `symbols_to_hide` - List of symbol names to hide/localize
 /// * `final_lib` - Path where the patched library will be written
 /// * `target_arch` - Optional target architecture (e.g., "aarch64", "x86_64"). If `None`, uses host architecture.
+/// * `target_triplet` - Optional full Rust target triplet (e.g., "aarch64-apple-ios"). Required for
+///   correct Apple platform selection; without it the host OS is assumed.
 ///
 /// # Panics
 ///
@@ -61,6 +63,7 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 ///     &default_symbol_blocklist(),
 ///     Path::new("libthirdparty_patched.a"),
 ///     None,
+///     None,
 /// );
 /// ```
 ///
@@ -78,6 +81,7 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 ///     &symbols,
 ///     Path::new("libthirdparty_patched.a"),
 ///     None,
+///     None,
 /// );
 /// ```
 pub fn patch_lib(
@@ -87,6 +91,7 @@ pub fn patch_lib(
     symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: Option<&str>,
+    target_triplet: Option<&str>,
 ) {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
         // Fall back to detecting the current OS if not in a cargo build context
@@ -114,13 +119,14 @@ pub fn patch_lib(
             final_lib,
             &final_arch,
         ),
-        "macos" | "ios" => patch_macos(
+        "macos" | "ios" | "tvos" | "visionos" => patch_apple(
             static_lib,
             out_dir,
             lib_name,
             symbols_to_hide,
             final_lib,
             &final_arch,
+            target_triplet,
         ),
         _ => patch_linux(
             static_lib,
@@ -645,21 +651,70 @@ fn detect_archive_arch(static_lib: &Path) -> String {
     "x86_64".to_string()
 }
 
-// macOS/iOS: Use ld -r with exported_symbols_list
-fn patch_macos(
+/// Returns the `ld -platform_version` arguments for an Apple target triplet.
+///
+/// Returns `(platform, min_version, sdk_version)`. The sdk_version is set to a
+/// recent-enough value; ld is lenient about it during partial (`-r`) links.
+fn apple_platform_version(triplet: Option<&str>, arch: &str) -> (&'static str, &'static str, &'static str) {
+    let Some(triplet) = triplet else {
+        return if arch == "arm64" {
+            ("macos", "11.0", "14.0")
+        } else {
+            ("macos", "10.13", "14.0")
+        };
+    };
+
+    if triplet.contains("apple-tvos") {
+        return if triplet.contains("-sim") {
+            ("tvos-simulator", "15.0", "17.0")
+        } else {
+            ("tvos", "15.0", "17.0")
+        };
+    }
+
+    if triplet.contains("apple-visionos") {
+        return if triplet.contains("-sim") {
+            ("xros-simulator", "1.0", "2.0")
+        } else {
+            ("xros", "1.0", "2.0")
+        };
+    }
+
+    if triplet.contains("apple-ios") {
+        if triplet.ends_with("-sim") {
+            return ("ios-simulator", "15.0", "17.0");
+        } else if triplet.ends_with("-macabi") {
+            return ("mac-catalyst", "15.0", "17.0");
+        } else {
+            return ("ios", "15.0", "17.0");
+        }
+    }
+
+    if arch == "arm64" {
+        ("macos", "11.0", "14.0")
+    } else {
+        ("macos", "10.13", "14.0")
+    }
+}
+
+// Apple (macOS / iOS / tvOS / visionOS): Use ld -r with exported_symbols_list
+fn patch_apple(
     static_lib: &Path,
     out_dir: &Path,
     lib_name: &str,
     symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: &str,
+    triplet: Option<&str>,
 ) {
-    // Map Rust architecture names to macOS ld names
+    // Map Rust architecture names to ld arch names
     let arch = match target_arch {
         "aarch64" | "arm64" => "arm64",
         "x86_64" => "x86_64",
         a => a,
     };
+
+    let (platform, min_ver, sdk_ver) = apple_platform_version(triplet, arch);
 
     let temp_obj_dir = out_dir.join(format!("{}_objs", lib_name));
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
@@ -712,13 +767,9 @@ fn patch_macos(
     let mut ld_cmd = Command::new("xcrun");
     ld_cmd
         .arg("ld")
-        .arg("-arch")
-        .arg(arch)
+        .arg("-arch").arg(arch)
         .arg("-r")
-        .arg("-platform_version")
-        .arg("macos")
-        .arg(if arch == "arm64" { "11.0" } else { "10.13" })
-        .arg("14.0")
+        .arg("-platform_version").arg(platform).arg(min_ver).arg(sdk_ver)
         .arg("-o")
         .arg(&intermediate);
 
@@ -792,10 +843,11 @@ fn patch_macos(
     // Filter symbols
     let status = Command::new("xcrun")
         .arg("ld")
-        .args(["-arch", arch, "-r", "-o"])
-        .arg(&final_obj)
-        .arg("-exported_symbols_list")
-        .arg(&symbols_file)
+        .arg("-arch").arg(arch)
+        .arg("-r")
+        .arg("-platform_version").arg(platform).arg(min_ver).arg(sdk_ver)
+        .arg("-o").arg(&final_obj)
+        .arg("-exported_symbols_list").arg(&symbols_file)
         .arg(&intermediate)
         .status()
         .expect("Failed to run xcrun ld filter");
