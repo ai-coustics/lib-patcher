@@ -34,6 +34,12 @@ struct Args {
     #[arg(short, long, value_name = "NAME", default_value = "lib")]
     name: String,
 
+    /// Full Rust target triplet (e.g., "x86_64-pc-windows-gnullvm", "aarch64-apple-ios").
+    /// Selects the platform code path when cross-compiling and is required for correct
+    /// Apple platform selection.
+    #[arg(short = 'T', long, value_name = "TRIPLET")]
+    triplet: Option<String>,
+
     /// Directory for temporary files (defaults to system temp dir)
     #[arg(short, long, value_name = "DIR")]
     temp_dir: Option<PathBuf>,
@@ -103,6 +109,7 @@ fn main() {
         &keep_prefix,
         &output,
         None, // Architecture is auto-detected
+        args.triplet.as_deref(),
     );
 
     println!("✓ Successfully patched library!");

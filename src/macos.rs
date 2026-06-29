@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// macOS/iOS implementation: Uses ld -r + exported_symbols_list
+/// macOS / iOS / tvOS / visionOS implementation: Uses ld -r + exported_symbols_list
 pub(crate) fn patch_macos(
     static_lib: &Path,
     out_dir: &Path,
@@ -11,12 +11,15 @@ pub(crate) fn patch_macos(
     keep_prefix: &str,
     final_lib: &Path,
     target_arch: &str,
+    triplet: Option<&str>,
 ) {
     let arch = match target_arch {
         "aarch64" | "arm64" => "arm64",
         "x86_64" => "x86_64",
         a => a,
     };
+
+    let (platform, min_ver, sdk_ver) = apple_platform_version(triplet, arch);
 
     let temp_obj_dir = out_dir.join(format!("{}_objs", lib_name));
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
@@ -72,9 +75,9 @@ pub(crate) fn patch_macos(
         .arg(arch)
         .arg("-r")
         .arg("-platform_version")
-        .arg("macos")
-        .arg(if arch == "arm64" { "11.0" } else { "10.13" })
-        .arg("14.0")
+        .arg(platform)
+        .arg(min_ver)
+        .arg(sdk_ver)
         .arg("-o")
         .arg(&intermediate);
 
@@ -157,10 +160,10 @@ pub(crate) fn patch_macos(
             let symbol_type = parts[1];
             let symbol_name = parts[2];
 
-            if symbol_type.chars().next().unwrap_or('_').is_uppercase() {
-                if !symbols_to_hide.contains(&symbol_name.to_string()) {
-                    keep_symbols.push(symbol_name.to_string());
-                }
+            if symbol_type.chars().next().unwrap_or('_').is_uppercase()
+                && !symbols_to_hide.contains(&symbol_name.to_string())
+            {
+                keep_symbols.push(symbol_name.to_string());
             }
         }
     }
@@ -175,7 +178,14 @@ pub(crate) fn patch_macos(
     eprintln!("Filtering symbols...");
     let status = Command::new("xcrun")
         .arg("ld")
-        .args(["-arch", arch, "-r", "-o"])
+        .arg("-arch")
+        .arg(arch)
+        .arg("-r")
+        .arg("-platform_version")
+        .arg(platform)
+        .arg(min_ver)
+        .arg(sdk_ver)
+        .arg("-o")
         .arg(&final_obj)
         .arg("-exported_symbols_list")
         .arg(&symbols_file)
@@ -207,4 +217,53 @@ pub(crate) fn patch_macos(
     fs::remove_dir_all(&temp_obj_dir).ok();
 
     eprintln!("✓ macOS patching complete");
+}
+
+/// Returns the `ld -platform_version` arguments for an Apple target triplet.
+///
+/// Returns `(platform, min_version, sdk_version)`. The sdk_version is set to a
+/// recent-enough value; ld is lenient about it during partial (`-r`) links.
+fn apple_platform_version(
+    triplet: Option<&str>,
+    arch: &str,
+) -> (&'static str, &'static str, &'static str) {
+    let Some(triplet) = triplet else {
+        return if arch == "arm64" {
+            ("macos", "11.0", "14.0")
+        } else {
+            ("macos", "10.13", "14.0")
+        };
+    };
+
+    if triplet.contains("apple-tvos") {
+        return if triplet.contains("-sim") {
+            ("tvos-simulator", "15.0", "17.0")
+        } else {
+            ("tvos", "15.0", "17.0")
+        };
+    }
+
+    if triplet.contains("apple-visionos") {
+        return if triplet.contains("-sim") {
+            ("xros-simulator", "1.0", "2.0")
+        } else {
+            ("xros", "1.0", "2.0")
+        };
+    }
+
+    if triplet.contains("apple-ios") {
+        if triplet.ends_with("-sim") {
+            return ("ios-simulator", "15.0", "17.0");
+        } else if triplet.ends_with("-macabi") {
+            return ("mac-catalyst", "15.0", "17.0");
+        } else {
+            return ("ios", "15.0", "17.0");
+        }
+    }
+
+    if arch == "arm64" {
+        ("macos", "11.0", "14.0")
+    } else {
+        ("macos", "10.13", "14.0")
+    }
 }

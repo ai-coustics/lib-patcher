@@ -18,6 +18,8 @@ use object::{Object as ObjectTrait, ObjectSymbol};
 /// * `keep_prefix` - Prefix for symbols to keep public (e.g., "mylib_")
 /// * `final_lib` - Path where the patched library will be written
 /// * `target_arch` - Optional target architecture (e.g., "aarch64", "x86_64"). If `None`, uses host architecture.
+/// * `target_triplet` - Optional full Rust target triplet (e.g., "aarch64-apple-ios"). Selects the
+///   platform code path when cross-compiling and is required for correct Apple platform selection.
 ///
 /// # Examples
 ///
@@ -32,6 +34,7 @@ use object::{Object as ObjectTrait, ObjectSymbol};
 ///     "thirdparty_",
 ///     Path::new("libthirdparty_patched.a"),
 ///     None,
+///     None,
 /// );
 /// ```
 pub fn patch_lib(
@@ -41,18 +44,25 @@ pub fn patch_lib(
     keep_prefix: &str,
     final_lib: &Path,
     target_arch: Option<&str>,
+    target_triplet: Option<&str>,
 ) {
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
-        if cfg!(target_os = "windows") {
-            "windows".to_string()
-        } else if cfg!(target_os = "macos") {
-            "macos".to_string()
-        } else if cfg!(target_os = "ios") {
-            "ios".to_string()
-        } else {
-            "linux".to_string()
-        }
-    });
+    // Prefer the explicit triplet: when cross-compiling, the target OS differs
+    // from both the host and CARGO_CFG_TARGET_OS (which is unset for the CLI).
+    let target_os = target_triplet
+        .and_then(target_os_from_triplet)
+        .map(str::to_string)
+        .or_else(|| std::env::var("CARGO_CFG_TARGET_OS").ok())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "windows".to_string()
+            } else if cfg!(target_os = "macos") {
+                "macos".to_string()
+            } else if cfg!(target_os = "ios") {
+                "ios".to_string()
+            } else {
+                "linux".to_string()
+            }
+        });
 
     // Detect architecture from the library file
     let detected_arch = detect_archive_arch(static_lib);
@@ -67,13 +77,14 @@ pub fn patch_lib(
             final_lib,
             &final_arch,
         ),
-        "macos" | "ios" => patch_macos(
+        "macos" | "ios" | "tvos" | "visionos" => patch_macos(
             static_lib,
             out_dir,
             lib_name,
             keep_prefix,
             final_lib,
             &final_arch,
+            target_triplet,
         ),
         _ => patch_linux(
             static_lib,
@@ -87,10 +98,52 @@ pub fn patch_lib(
 
     // Verify the patched library
     eprintln!("\nVerifying patched library...");
-    if let Err(e) = verify_patched_lib(final_lib, static_lib, &target_os) {
-        eprintln!("\n⚠️  VERIFICATION WARNING: {}", e);
-        eprintln!("The library may still work, but verification encountered issues.");
+    if let Err(e) = verify_patched_lib(final_lib, static_lib, keep_prefix, &target_os) {
+        eprintln!("\n❌ VERIFICATION FAILED: {}", e);
+        eprintln!("The patched library may be corrupted or incomplete.");
+        std::process::exit(1);
     }
+}
+
+/// Maps a Rust target triplet to the OS key used by `patch_lib` for dispatch.
+///
+/// Returns `None` for triplets that do not clearly identify an OS, so the
+/// caller can fall back to the environment or host detection.
+fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
+    if triplet.contains("windows") {
+        Some("windows")
+    } else if triplet.contains("apple-ios") {
+        Some("ios")
+    } else if triplet.contains("apple-tvos") {
+        Some("tvos")
+    } else if triplet.contains("apple-visionos") {
+        Some("visionos")
+    } else if triplet.contains("apple") || triplet.contains("darwin") {
+        Some("macos")
+    } else if triplet.contains("linux") || triplet.contains("android") {
+        Some("linux")
+    } else {
+        None
+    }
+}
+
+/// Returns true if a global symbol is allowed to remain public after patching.
+///
+/// Besides the user's `keep_prefix`, a handful of compiler/linker-internal
+/// symbols are legitimately left global by the per-platform patchers (and on
+/// Windows they are renamed under `keep_prefix`, so they pass anyway).
+fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
+    // macOS prefixes user symbols with an underscore in the symbol table.
+    let unprefixed = name.strip_prefix('_').unwrap_or(name);
+    name.starts_with(keep_prefix)
+        || unprefixed.starts_with(keep_prefix)
+        || unprefixed.starts_with("DW.ref.")
+        || unprefixed.starts_with("_GLOBAL_OFFSET_TABLE_")
+        || unprefixed.starts_with("GCC_except_table")
+        // COFF section/compiler symbols and MSVC-mangled names.
+        || name.starts_with('@')
+        || name.starts_with('.')
+        || name.starts_with("??")
 }
 
 // Include platform-specific implementations from allowlist module
@@ -153,6 +206,7 @@ fn detect_archive_arch(static_lib: &Path) -> String {
 fn verify_patched_lib(
     static_lib: &Path,
     original_lib: &Path,
+    keep_prefix: &str,
     target_os: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Check that output file exists
@@ -196,9 +250,47 @@ fn verify_patched_lib(
         return Err("Output library contains no symbols - patching may have failed".into());
     }
 
+    // 4. Enforce the allowlist invariant: every remaining global symbol must
+    // either carry the keep_prefix or be one of the known compiler-internal
+    // symbols. Anything else (Rust stdlib, dependencies) leaking out as global
+    // would defeat the purpose and risk the conflicts we are trying to prevent.
+    //
+    // Windows import-library members (e.g. ProcessPrng from bcryptprimitives)
+    // are exempt: their names must match the system DLL exports, so they cannot
+    // be renamed, and duplicate imports do not conflict the way defined symbols
+    // do. They are recognised by their paired `__imp_<name>` thunk.
+    let import_thunks: HashSet<&str> = symbols
+        .iter()
+        .filter_map(|s| s.strip_prefix("__imp_"))
+        .collect();
+    let leaked: Vec<&String> = symbols
+        .iter()
+        .filter(|s| {
+            !symbol_is_allowed_global(s, keep_prefix)
+                && !s.starts_with("__imp_")
+                && !import_thunks.contains(s.as_str())
+        })
+        .collect();
+
+    if !leaked.is_empty() {
+        return Err(format!(
+            "{} global symbol(s) do not match keep-prefix '{}' and were not hidden, e.g.: {}",
+            leaked.len(),
+            keep_prefix,
+            leaked
+                .iter()
+                .take(10)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+
     eprintln!(
-        "  ✓ Output library contains {} total public symbols",
-        symbols.len()
+        "  ✓ Output library contains {} public symbols, all matching '{}'",
+        symbols.len(),
+        keep_prefix
     );
 
     Ok(())

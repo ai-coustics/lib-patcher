@@ -57,10 +57,11 @@ pub(crate) fn patch_windows(
         // Parse object file to find defined symbols
         if let Ok(file) = File::parse(data) {
             for symbol in file.symbols() {
-                if symbol.is_global() && !symbol.is_undefined() {
-                    if let Ok(name) = symbol.name() {
-                        defined_symbols.insert(name.to_string());
-                    }
+                if symbol.is_global()
+                    && !symbol.is_undefined()
+                    && let Ok(name) = symbol.name()
+                {
+                    defined_symbols.insert(name.to_string());
                 }
             }
         }
@@ -83,7 +84,7 @@ pub(crate) fn patch_windows(
         // Skip special compiler symbols (heuristic)
         // We MUST rename .weak symbols to avoid LNK2005 conflicts
         if symbol.starts_with("??") {
-             continue;
+            continue;
         }
 
         let new_name = format!("{}{}", keep_prefix, symbol);
@@ -117,7 +118,7 @@ pub(crate) fn patch_windows(
 
     for (i, obj_path) in obj_files.iter().enumerate() {
         let patched_path = temp_dir.join(format!("{}_patched.obj", i));
-        
+
         let status = Command::new(&objcopy)
             .arg(format!("--redefine-syms={}", renames_path.display()))
             .arg(obj_path)
@@ -173,15 +174,23 @@ pub(crate) fn patch_windows(
     });
 
     if !status.success() {
-        panic!("{} failed with exit code: {:?}", lib_cmd.tool, status.code());
+        panic!(
+            "{} failed with exit code: {:?}",
+            lib_cmd.tool,
+            status.code()
+        );
     }
 
     eprintln!("✓ Windows patching complete (via renaming)");
 }
 
 fn find_objcopy_tool() -> PathBuf {
-    if let Ok(path) = which::which("llvm-objcopy") { return path; }
-    if let Ok(path) = which::which("rust-objcopy") { return path; }
+    if let Ok(path) = which::which("llvm-objcopy") {
+        return path;
+    }
+    if let Ok(path) = which::which("rust-objcopy") {
+        return path;
+    }
 
     let vs_llvm_paths = [
         r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\llvm-objcopy.exe",
@@ -192,7 +201,9 @@ fn find_objcopy_tool() -> PathBuf {
 
     for path_str in &vs_llvm_paths {
         let path = PathBuf::from(path_str);
-        if path.exists() { return path; }
+        if path.exists() {
+            return path;
+        }
     }
 
     if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
@@ -202,7 +213,9 @@ fn find_objcopy_tool() -> PathBuf {
         if let Ok(entries) = fs::read_dir(&rustlib) {
             for entry in entries.flatten() {
                 let bin_objcopy = entry.path().join("bin").join("rust-objcopy.exe");
-                if bin_objcopy.exists() { return bin_objcopy; }
+                if bin_objcopy.exists() {
+                    return bin_objcopy;
+                }
             }
         }
     }
