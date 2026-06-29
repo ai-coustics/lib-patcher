@@ -57,9 +57,11 @@ pub(crate) fn patch_linux(
             let ndx = parts.get(6).unwrap_or(&"");
             let symbol_name = parts.get(7).unwrap_or(&"");
 
-            // Consider GLOBAL symbols with any visibility (DEFAULT or HIDDEN) that are DEFINED (not UND)
-            // HIDDEN symbols still need to be localized to prevent conflicts
-            if *bind == "GLOBAL"
+            // Consider GLOBAL and WEAK symbols with any visibility (DEFAULT or HIDDEN)
+            // that are DEFINED (not UND). Weak symbols (e.g. compiler-builtins like
+            // __adddf3) are externally visible and conflict just like global ones, so
+            // they must be localized too. HIDDEN symbols also need localizing.
+            if (*bind == "GLOBAL" || *bind == "WEAK")
                 && (*vis == "DEFAULT" || *vis == "HIDDEN")
                 && *ndx != "UND"
                 && !symbol_name.is_empty()
