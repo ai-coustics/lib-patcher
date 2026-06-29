@@ -46,9 +46,23 @@ lib-patcher \
 - `--input, -i`: Path to input static library (required)
 - `--output, -o`: Path to output patched library (required)
 - `--keep-prefix, -k`: Prefix for symbols to keep public (required)
+- `--triplet, -T`: Full Rust target triplet (e.g. `x86_64-pc-windows-gnullvm`, `aarch64-apple-ios`). Needed when cross-compiling: it selects the platform code path and the correct Apple platform version. Without it the host OS is assumed.
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
 - `--temp-dir, -t`: Directory for temporary files (optional)
 - `--list, -l`: List all public symbols instead of patching
+
+#### Cross-compiling
+
+When patching a library built for a target other than the host, pass the
+triplet so the right platform tooling is used:
+
+```bash
+lib-patcher \
+  --input target/x86_64-pc-windows-gnullvm/release/libmylib.a \
+  --output libmylib_patched.a \
+  --keep-prefix "mylib_" \
+  --triplet x86_64-pc-windows-gnullvm
+```
 
 #### List Symbols
 
@@ -76,6 +90,7 @@ fn main() {
         "thirdparty_",  // Keep only symbols starting with "thirdparty_"
         Path::new("libthirdparty_patched.a"),
         None,  // Auto-detect architecture
+        None,  // Triplet: None uses the host OS (set when cross-compiling)
     );
 
     println!("cargo:rustc-link-search=native={}", out_dir);
