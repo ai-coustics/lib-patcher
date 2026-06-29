@@ -93,18 +93,24 @@ pub fn patch_lib(
     target_arch: Option<&str>,
     target_triplet: Option<&str>,
 ) {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
-        // Fall back to detecting the current OS if not in a cargo build context
-        if cfg!(target_os = "windows") {
-            "windows".to_string()
-        } else if cfg!(target_os = "macos") {
-            "macos".to_string()
-        } else if cfg!(target_os = "ios") {
-            "ios".to_string()
-        } else {
-            "linux".to_string()
-        }
-    });
+    // Prefer the explicit triplet: when cross-compiling, the target OS differs
+    // from both the host and CARGO_CFG_TARGET_OS (which is unset for the CLI).
+    let target_os = target_triplet
+        .and_then(target_os_from_triplet)
+        .map(str::to_string)
+        .or_else(|| env::var("CARGO_CFG_TARGET_OS").ok())
+        .unwrap_or_else(|| {
+            // Fall back to detecting the current OS if not in a cargo build context
+            if cfg!(target_os = "windows") {
+                "windows".to_string()
+            } else if cfg!(target_os = "macos") {
+                "macos".to_string()
+            } else if cfg!(target_os = "ios") {
+                "ios".to_string()
+            } else {
+                "linux".to_string()
+            }
+        });
 
     // Detect architecture from the library file
     let detected_arch = detect_archive_arch(static_lib);
@@ -649,6 +655,28 @@ fn detect_archive_arch(static_lib: &Path) -> String {
     // If we can't detect, warn and default to x86_64
     eprintln!("Warning: Could not detect architecture from library, defaulting to x86_64");
     "x86_64".to_string()
+}
+
+/// Maps a Rust target triplet to the OS key used by `patch_lib` for dispatch.
+///
+/// Returns `None` for triplets that do not clearly identify an OS, so the
+/// caller can fall back to the environment or host detection.
+fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
+    if triplet.contains("windows") {
+        Some("windows")
+    } else if triplet.contains("apple-ios") {
+        Some("ios")
+    } else if triplet.contains("apple-tvos") {
+        Some("tvos")
+    } else if triplet.contains("apple-visionos") {
+        Some("visionos")
+    } else if triplet.contains("apple") || triplet.contains("darwin") {
+        Some("macos")
+    } else if triplet.contains("linux") || triplet.contains("android") {
+        Some("linux")
+    } else {
+        None
+    }
 }
 
 /// Returns the `ld -platform_version` arguments for an Apple target triplet.
