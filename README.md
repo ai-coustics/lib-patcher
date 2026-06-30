@@ -151,15 +151,24 @@ fn main() {
 6. Creates final archive with `ar`
 
 #### Windows
-1. Parses the COFF archive to extract each object file
-2. For each object, directly patches the COFF symbol table
-3. Changes storage class from EXTERNAL (2) to STATIC (3) for symbols to hide
-4. Preserves COMDAT and DWARF symbols for proper linking
+1. Parses the COFF archive and extracts each object file
+2. Scans every object for defined global symbols
+3. For each symbol that does **not** start with the keep-prefix, generates a rename to `<keep-prefix><symbol>` (MSVC-mangled `??`-symbols are left untouched)
+4. Applies the renames per object with `llvm-objcopy --redefine-syms`, so the renamed symbols no longer collide with the consumer's identically-named symbols
 5. Re-creates the library with `lib.exe` / `llvm-lib` / `llvm-ar`
 
 ### What Gets Hidden
 
-Everything except:
+Everything except your public API (symbols starting with the keep-prefix) is taken
+out of the way:
+
+- On **Linux/macOS** non-matching symbols are localized so they are no longer
+  externally visible.
+- On **Windows** non-matching symbols are renamed under the keep-prefix instead of
+  localized (COFF makes localizing weak/COMDAT symbols unsafe), which removes the
+  collision just the same.
+
+The following are always left alone because they are needed for linking:
 - Symbols starting with your specified prefix (your public API)
 - DWARF debug symbols (`DW.ref.*`, `GCC_except_table`)
 - Special linker symbols (`_GLOBAL_OFFSET_TABLE_`, `@`-prefixed symbols)

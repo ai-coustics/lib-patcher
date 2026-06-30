@@ -1,5 +1,11 @@
 This project is meant to patch static rust libraries so that they can be used in other rust projects.
 
+It works as an allowlist: `--keep-prefix <PREFIX>` keeps only the symbols that start
+with your public-API prefix and hides everything else (Rust stdlib and dependency
+symbols), which is what prevents the linking conflicts. The older blocklist flags
+(`--default` / `--symbols` / `--filter-prefix`, which hid a specific set of symbols
+and left the rest public) are still accepted but deprecated; prefer `--keep-prefix`.
+
 There is a CLI tool called lib-patcher and a direct library usage.
 
 Test projects are defined in the tests directory.

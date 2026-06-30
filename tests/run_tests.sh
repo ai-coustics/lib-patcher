@@ -32,14 +32,16 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     LIB_OUTPUT="$SCRIPT_DIR/testlib/target/release/testlib_patched.lib"
     "$PROJECT_ROOT/target/release/lib-patcher.exe" \
         --input "$LIB_INPUT" \
-        --output "$LIB_OUTPUT"
+        --output "$LIB_OUTPUT" \
+        --keep-prefix testlib_
 else
     # Linux/macOS
     LIB_INPUT="$SCRIPT_DIR/testlib/target/release/libtestlib.a"
     LIB_OUTPUT="$SCRIPT_DIR/testlib/target/release/libtestlib_patched.a"
     "$PROJECT_ROOT/target/release/lib-patcher" \
         --input "$LIB_INPUT" \
-        --output "$LIB_OUTPUT"
+        --output "$LIB_OUTPUT" \
+        --keep-prefix testlib_
 fi
 echo "✓ testlib patched"
 echo ""

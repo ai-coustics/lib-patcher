@@ -43,10 +43,11 @@ cargo build --release
 cd tests/testlib
 cargo build --release
 
-# 3. Patch the library
+# 3. Patch the library (keep only the testlib_ public API, hide everything else)
 ./target/release/lib-patcher \
   --input tests/testlib/target/release/libtestlib.a \
-  --output tests/testlib/target/release/libtestlib_patched.a
+  --output tests/testlib/target/release/libtestlib_patched.a \
+  --keep-prefix testlib_
 
 # 4. Run C test
 cd tests/c-consumer
@@ -70,7 +71,7 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 ## What Gets Tested
 
-1. **Symbol Patching**: The library is patched to hide Rust stdlib symbols
+1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
 2. **C FFI**: C code can successfully link and call the patched library
 3. **Cross-Version Rust**: A Rust program with different stdlib/dependency versions can link without conflicts
 4. **Platform Coverage**: Tests run on Linux, macOS, and Windows
