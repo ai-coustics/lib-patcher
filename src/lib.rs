@@ -53,8 +53,23 @@ fn coff_must_stay_global(name: &str) -> bool {
 /// referenced across object boundaries and localizing them breaks static linking.
 /// The MSVC targets use a different exception-handling model and don't hit this, so
 /// the flag stays off there and those symbols are localized as before.
-fn protect_cross_object_symbols(target_os: &str, triplet: Option<&str>) -> bool {
-    target_os == "windows" && triplet.is_some_and(|t| t.contains("windows-gnu"))
+///
+/// The triplet is optional (the CLI and `build.rs` callers often omit it), so when
+/// it is absent we fall back to the resolved target environment, which Cargo exposes
+/// as `CARGO_CFG_TARGET_ENV` (`"gnu"` for both `windows-gnu` and `windows-gnullvm`).
+fn protect_cross_object_symbols(
+    target_os: &str,
+    triplet: Option<&str>,
+    target_env: Option<&str>,
+) -> bool {
+    if target_os != "windows" {
+        return false;
+    }
+    // An explicit triplet is authoritative; otherwise use the target environment.
+    match triplet {
+        Some(t) => t.contains("windows-gnu"),
+        None => target_env == Some("gnu"),
+    }
 }
 
 /// Patches a static library to hide specific symbols.
@@ -142,7 +157,17 @@ pub fn patch_lib(
     let detected_arch = detect_archive_arch(static_lib);
     let final_arch = target_arch.map(|s| s.to_string()).unwrap_or(detected_arch);
 
-    let protect_cross_object = protect_cross_object_symbols(&target_os, target_triplet);
+    // Resolve the target environment for the GNU-ABI check: prefer Cargo's
+    // CARGO_CFG_TARGET_ENV, falling back to the host env when not run under Cargo.
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").ok().or_else(|| {
+        if cfg!(target_env = "gnu") {
+            Some("gnu".to_string())
+        } else {
+            None
+        }
+    });
+    let protect_cross_object =
+        protect_cross_object_symbols(&target_os, target_triplet, target_env.as_deref());
 
     match target_os.as_str() {
         "windows" => patch_windows(
@@ -1431,13 +1456,25 @@ mod tests {
 
     #[test]
     fn cross_object_protection_gates_on_windows_gnu_abi() {
-        let gnu = |t| protect_cross_object_symbols("windows", Some(t));
-        assert!(gnu("x86_64-pc-windows-gnu"));
-        assert!(gnu("x86_64-pc-windows-gnullvm"));
-        assert!(!gnu("x86_64-pc-windows-msvc"));
-        // Off for non-Windows and when the triplet is unknown.
-        assert!(!protect_cross_object_symbols("linux", Some("x86_64-unknown-linux-gnu")));
-        assert!(!protect_cross_object_symbols("windows", None));
+        // An explicit triplet is authoritative.
+        let by_triplet = |t| protect_cross_object_symbols("windows", Some(t), None);
+        assert!(by_triplet("x86_64-pc-windows-gnu"));
+        assert!(by_triplet("x86_64-pc-windows-gnullvm"));
+        assert!(!by_triplet("x86_64-pc-windows-msvc"));
+
+        // Without a triplet, fall back to the target env (e.g. a build.rs caller
+        // that only has CARGO_CFG_TARGET_OS / CARGO_CFG_TARGET_ENV).
+        assert!(protect_cross_object_symbols("windows", None, Some("gnu")));
+        assert!(!protect_cross_object_symbols("windows", None, Some("msvc")));
+        assert!(!protect_cross_object_symbols("windows", None, None));
+
+        // Off for non-Windows regardless of env.
+        assert!(!protect_cross_object_symbols("linux", None, Some("gnu")));
+        assert!(!protect_cross_object_symbols(
+            "linux",
+            Some("x86_64-unknown-linux-gnu"),
+            Some("gnu")
+        ));
     }
 
     #[test]
