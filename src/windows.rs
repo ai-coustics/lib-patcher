@@ -14,6 +14,53 @@ pub(crate) struct WindowsLibTool {
     pub is_llvm: bool,
 }
 
+/// Inserts the names of all globally-visible, *defined* symbols in a COFF object
+/// into `out`.
+///
+/// Undefined references are deliberately skipped: they carry no definition to
+/// rename here, and the rename map (applied to every object) rewrites their use
+/// sites to match whichever object actually defines the symbol. References to
+/// symbols that nothing in the archive defines — e.g. `rust_eh_personality`,
+/// supplied by the consumer's `libstd` — therefore never enter the map and keep
+/// binding as before.
+fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
+    if let Ok(file) = File::parse(data) {
+        for symbol in file.symbols() {
+            if symbol.is_global()
+                && !symbol.is_undefined()
+                && let Ok(name) = symbol.name()
+            {
+                out.insert(name.to_string());
+            }
+        }
+    }
+}
+
+/// Decides how a *defined* global symbol is treated under the allowlist.
+///
+/// Returns `Some(new_name)` when the symbol must be renamed under `keep_prefix`
+/// (the default for anything outside the public API), or `None` when it stays as
+/// it is — either because it already carries the prefix (it *is* public API) or
+/// because it is an MSVC-mangled name (`??...`) we must not touch.
+///
+/// The resulting map is applied to every object via `llvm-objcopy
+/// --redefine-syms`, so a symbol defined in one object and referenced from a
+/// sibling is renamed identically on both sides and stays linkable — including
+/// `ring`'s cross-object asm routines and their `i686`-decorated `_`-prefixed
+/// spellings, which need no special-casing because the rename is purely
+/// name-based.
+fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
+    if symbol.starts_with(keep_prefix) {
+        return None;
+    }
+    // MSVC-mangled names (??...) must be left alone; everything else (including
+    // .weak symbols, which would otherwise trigger LNK2005) gets renamed.
+    if symbol.starts_with("??") {
+        return None;
+    }
+    Some(format!("{}{}", keep_prefix, symbol))
+}
+
 /// Windows implementation: Renames symbols using llvm-objcopy on extracted objects
 pub(crate) fn patch_windows(
     static_lib: &Path,
@@ -55,16 +102,7 @@ pub(crate) fn patch_windows(
         obj_files.push(obj_path);
 
         // Parse object file to find defined symbols
-        if let Ok(file) = File::parse(data) {
-            for symbol in file.symbols() {
-                if symbol.is_global()
-                    && !symbol.is_undefined()
-                    && let Ok(name) = symbol.name()
-                {
-                    defined_symbols.insert(name.to_string());
-                }
-            }
-        }
+        collect_defined_globals(data, &mut defined_symbols);
     }
 
     eprintln!("Extracted {} objects.", obj_files.len());
@@ -76,20 +114,19 @@ pub(crate) fn patch_windows(
     let mut renamed_count = 0;
 
     for symbol in defined_symbols {
-        if symbol.starts_with(keep_prefix) {
-            kept_count += 1;
-            continue;
+        match rename_target(&symbol, keep_prefix) {
+            Some(new_name) => {
+                renames.push(format!("{} {}", symbol, new_name));
+                renamed_count += 1;
+            }
+            // Left public: either already prefixed (counts as kept API) or an
+            // MSVC-mangled name we skip silently, matching the prior behavior.
+            None => {
+                if symbol.starts_with(keep_prefix) {
+                    kept_count += 1;
+                }
+            }
         }
-
-        // Skip special compiler symbols (heuristic)
-        // We MUST rename .weak symbols to avoid LNK2005 conflicts
-        if symbol.starts_with("??") {
-            continue;
-        }
-
-        let new_name = format!("{}{}", keep_prefix, symbol);
-        renames.push(format!("{} {}", symbol, new_name));
-        renamed_count += 1;
     }
 
     eprintln!(
@@ -317,4 +354,233 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
          1. MSVC Build Tools (recommended): provides lib.exe\n\
          2. LLVM tools: provides llvm-lib (preferred) or llvm-ar (fallback)"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the Windows/COFF allowlist (renaming) path.
+    //!
+    //! The COFF backend keeps only the public API global by *renaming* every other
+    //! defined symbol under `keep_prefix` (via `llvm-objcopy --redefine-syms`),
+    //! rather than flipping storage classes per object. Because the rename map is
+    //! keyed by name and applied to every object, a symbol defined in one object and
+    //! referenced from a sibling — `ring`'s asm routines (`ring_core_*`), say — is
+    //! rewritten identically on both sides and stays linkable. These tests pin that
+    //! behavior down on synthetic COFF objects built with `object::write`, the same
+    //! def/ref shape used to reproduce the original `ring` static-link failure.
+
+    use super::*;
+    use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
+    use object::{
+        Architecture, BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind,
+        SymbolScope,
+    };
+
+    const RING_SYM: &str = "ring_core_0_17_14__sha256_block_data_order_hw";
+    const PREFIX: &str = "myapp_";
+
+    /// Reads a NUL-terminated string out of the COFF string table.
+    fn read_cstr(data: &[u8], off: usize) -> String {
+        let end = data[off..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| off + p)
+            .unwrap_or(data.len());
+        String::from_utf8_lossy(&data[off..end]).to_string()
+    }
+
+    /// `(name, storage_class, section_number)` for every primary symbol entry,
+    /// parsed straight from the COFF symbol table (auxiliary entries skipped).
+    fn coff_symbols(data: &[u8]) -> Vec<(String, u8, i16)> {
+        use object::LittleEndian as LE;
+        use object::pe;
+        use object::read::coff::CoffHeader;
+
+        let mut offset = 0u64;
+        let header = pe::ImageFileHeader::parse(data, &mut offset).unwrap();
+        let sym_off = header.pointer_to_symbol_table.get(LE) as usize;
+        let count = header.number_of_symbols.get(LE) as usize;
+        let str_off = sym_off + count * 18;
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < count {
+            let so = sym_off + i * 18;
+            let entry = &data[so..so + 18];
+            let storage = entry[16];
+            let section = i16::from_le_bytes([entry[12], entry[13]]);
+            let n_aux = entry[17] as usize;
+            let name = if entry[0..4] == [0, 0, 0, 0] {
+                let strofs = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize;
+                read_cstr(data, str_off + strofs)
+            } else {
+                let end = entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
+                String::from_utf8_lossy(&entry[0..end]).to_string()
+            };
+            out.push((name, storage, section));
+            i += 1 + n_aux;
+        }
+        out
+    }
+
+    /// Object A: *defines* `name` in `.text` as an external (global) symbol,
+    /// mirroring the ring object that contains the asm routine body.
+    fn make_def_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0x90, 0x90, 0xc3], 16); // nop; nop; ret
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: off,
+            size: 3,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
+    /// Object B: *references* `name` via a REL32 relocation (an external undefined
+    /// symbol), mirroring the ring object that calls into the asm routine.
+    fn make_ref_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        // e8 <rel32> = call rel32; c3 = ret. The rel32 placeholder is relocated.
+        let off = obj.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 16);
+        let sym = obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        obj.add_relocation(
+            text,
+            Relocation {
+                offset: off + 1,
+                symbol: sym,
+                addend: -4,
+                flags: RelocationFlags::Coff {
+                    typ: object::pe::IMAGE_REL_AMD64_REL32,
+                },
+            },
+        )
+        .unwrap();
+        obj.write().unwrap()
+    }
+
+    /// Builds the rename map exactly as `patch_windows` does: collect the defined
+    /// globals across every object, then ask `rename_target` for each.
+    fn rename_map(
+        objects: &[Vec<u8>],
+        keep_prefix: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut defined = HashSet::new();
+        for obj in objects {
+            collect_defined_globals(obj, &mut defined);
+        }
+        defined
+            .into_iter()
+            .filter_map(|s| rename_target(&s, keep_prefix).map(|new| (s, new)))
+            .collect()
+    }
+
+    #[test]
+    fn harness_builds_expected_def_and_ref_objects() {
+        // Sanity-check the synthetic objects: the def is a global (storage class 2)
+        // symbol in a real section, the ref is the same name left undefined (section 0).
+        let def = coff_symbols(&make_def_object(RING_SYM));
+        let (_, sc, sec) = def.iter().find(|(n, _, _)| n == RING_SYM).unwrap();
+        assert_eq!(*sc, 2, "definition must be External");
+        assert!(*sec > 0, "definition must live in a section");
+
+        let r = coff_symbols(&make_ref_object(RING_SYM));
+        let (_, sc, sec) = r.iter().find(|(n, _, _)| n == RING_SYM).unwrap();
+        assert_eq!(*sc, 2, "reference must be External");
+        assert_eq!(*sec, 0, "reference must be undefined");
+    }
+
+    #[test]
+    fn defined_globals_collected_but_undefined_refs_are_not() {
+        // Only the defining object contributes RING_SYM; the referencing object
+        // contributes nothing, so an undefined-only symbol never enters the map.
+        let mut from_def = HashSet::new();
+        collect_defined_globals(&make_def_object(RING_SYM), &mut from_def);
+        assert!(from_def.contains(RING_SYM));
+
+        let mut from_ref = HashSet::new();
+        collect_defined_globals(&make_ref_object(RING_SYM), &mut from_ref);
+        assert!(
+            !from_ref.contains(RING_SYM),
+            "an undefined reference must not be treated as a definition"
+        );
+    }
+
+    #[test]
+    fn ring_intra_library_symbol_is_renamed_consistently() {
+        // The defining object and the sibling that references it are processed into
+        // one rename map. Because the map is keyed by name, both sides get rewritten
+        // to the same `keep_prefix`ed name and stay linkable.
+        let map = rename_map(
+            &[make_def_object(RING_SYM), make_ref_object(RING_SYM)],
+            PREFIX,
+        );
+        assert_eq!(
+            map.get(RING_SYM).map(String::as_str),
+            Some(format!("{PREFIX}{RING_SYM}").as_str()),
+            "ring's cross-object symbol must be renamed under keep_prefix"
+        );
+    }
+
+    #[test]
+    fn underscore_decorated_ring_symbol_is_renamed() {
+        // 32-bit Windows GNU (i686) decorates externals with a leading underscore.
+        // The rename is purely name-based, so the decorated spelling is handled with
+        // no special-casing.
+        let decorated = format!("_{RING_SYM}");
+        let map = rename_map(&[make_def_object(&decorated)], PREFIX);
+        assert_eq!(
+            map.get(&decorated).map(String::as_str),
+            Some(format!("{PREFIX}{decorated}").as_str()),
+        );
+    }
+
+    #[test]
+    fn rust_eh_personality_reference_is_left_to_libstd() {
+        // `rust_eh_personality` is defined by the consumer's `libstd`, so in a
+        // patched archive it appears only as an undefined cross-object reference.
+        // It must NOT be renamed, or it would no longer bind to libstd's copy.
+        let map = rename_map(&[make_ref_object("rust_eh_personality")], PREFIX);
+        assert!(
+            map.is_empty(),
+            "an undefined `rust_eh_personality` reference must not be renamed"
+        );
+    }
+
+    #[test]
+    fn ordinary_defined_symbol_is_renamed() {
+        // A defined symbol outside the public API is renamed under keep_prefix.
+        let map = rename_map(&[make_def_object("some_internal_function")], PREFIX);
+        assert_eq!(
+            map.get("some_internal_function").map(String::as_str),
+            Some(format!("{PREFIX}some_internal_function").as_str()),
+        );
+    }
+
+    #[test]
+    fn keep_prefix_and_mangled_symbols_stay_public() {
+        // Already-public API keeps its name; MSVC-mangled (??...) names are untouched.
+        assert_eq!(rename_target("myapp_add", PREFIX), None);
+        assert_eq!(rename_target("??_C@_05foo@bar@", PREFIX), None);
+        // Everything else is renamed.
+        assert_eq!(
+            rename_target("internal", PREFIX),
+            Some("myapp_internal".to_string())
+        );
+    }
 }
