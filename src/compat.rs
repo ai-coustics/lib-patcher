@@ -4,8 +4,8 @@
 //! only symbols with a given prefix, hide everything else), it worked as a
 //! *blocklist*: hide a specific set of symbols (or symbols matching a prefix),
 //! leaving everything else public. The blocklist is the imperfect approach we
-//! are moving away from — it misses, for example, v0-mangled `__rust_alloc`
-//! shims — but old callers still depend on it, so the implementation is kept
+//! are moving away from (it misses, for example, v0-mangled `__rust_alloc`
+//! shims), but old callers still depend on it, so the implementation is kept
 //! here verbatim and wired up behind the deprecated CLI flags.
 //!
 //! The allowlist path in the crate root is the default; this module is only

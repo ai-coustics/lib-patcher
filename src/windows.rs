@@ -14,15 +14,13 @@ pub(crate) struct WindowsLibTool {
     pub is_llvm: bool,
 }
 
-/// Inserts the names of all globally-visible, *defined* symbols in a COFF object
-/// into `out`.
+/// Inserts the names of all globally-visible, *defined* symbols into `out`.
 ///
-/// Undefined references are deliberately skipped: they carry no definition to
-/// rename here, and the rename map (applied to every object) rewrites their use
-/// sites to match whichever object actually defines the symbol. References to
-/// symbols that nothing in the archive defines — e.g. `rust_eh_personality`,
-/// supplied by the consumer's `libstd` — therefore never enter the map and keep
-/// binding as before.
+/// Undefined references are skipped: they have no definition to rename, and the
+/// rename map (applied to every object) rewrites their use sites to match
+/// whichever object defines the symbol. References that nothing in the archive
+/// defines (e.g. `rust_eh_personality`, supplied by the consumer's `libstd`)
+/// never enter the map and keep binding as before.
 fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     if let Ok(file) = File::parse(data) {
         for symbol in file.symbols() {
@@ -36,32 +34,29 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     }
 }
 
-/// Whether `data` is a regular COFF object that the renamer can rewrite and the
+/// Whether `data` is a regular COFF object the renamer can rewrite and the
 /// archiver can store.
 ///
-/// Non-COFF archive members — LLVM bitcode emitted for LTO, or import
-/// descriptors — return `false`. `llvm-objcopy` rejects them ("unsupported
-/// object file format"), and, more importantly, passing them on to `lib.exe`
-/// can crash the librarian (`LNK1000`). They are duplicates of, or metadata for,
-/// the native COFF members, so they are dropped from the output — matching the
-/// in-place COFF patcher, which likewise skipped anything it could not parse.
+/// Non-COFF members (LLVM bitcode, import descriptors) return `false`.
+/// `llvm-objcopy` rejects them, and passing them to `lib.exe` can crash the
+/// librarian (`LNK1000`). They duplicate the native COFF members, so they are
+/// dropped, matching the in-place COFF patcher.
 fn is_patchable_coff(data: &[u8]) -> bool {
     matches!(File::parse(data), Ok(file) if file.format() == object::BinaryFormat::Coff)
 }
 
 /// Decides how a *defined* global symbol is treated under the allowlist.
 ///
-/// Returns `Some(new_name)` when the symbol must be renamed under `keep_prefix`
-/// (the default for anything outside the public API), or `None` when it stays as
-/// it is — either because it already carries the prefix (it *is* public API) or
-/// because it is an MSVC-mangled name (`??...`) we must not touch.
+/// Returns `Some(new_name)` to rename the symbol under `keep_prefix` (the
+/// default for anything outside the public API), or `None` to leave it: it
+/// already carries the prefix (it *is* public API), or it is an MSVC-mangled
+/// name (`??...`) we must not touch.
 ///
-/// The resulting map is applied to every object via `llvm-objcopy
-/// --redefine-syms`, so a symbol defined in one object and referenced from a
-/// sibling is renamed identically on both sides and stays linkable — including
-/// `ring`'s cross-object asm routines and their `i686`-decorated `_`-prefixed
-/// spellings, which need no special-casing because the rename is purely
-/// name-based.
+/// The map is applied to every object via `llvm-objcopy --redefine-syms`, so a
+/// symbol defined in one object and referenced from a sibling is renamed
+/// identically on both sides and stays linkable. This covers `ring`'s
+/// cross-object asm routines and their `i686`-decorated `_`-prefixed spellings,
+/// which need no special-casing because the rename is purely name-based.
 fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
     if symbol.starts_with(keep_prefix) {
         return None;
@@ -388,12 +383,12 @@ mod tests {
     //!
     //! The COFF backend keeps only the public API global by *renaming* every other
     //! defined symbol under `keep_prefix` (via `llvm-objcopy --redefine-syms`),
-    //! rather than flipping storage classes per object. Because the rename map is
-    //! keyed by name and applied to every object, a symbol defined in one object and
-    //! referenced from a sibling — `ring`'s asm routines (`ring_core_*`), say — is
+    //! rather than flipping storage classes per object. The rename map is keyed by
+    //! name and applied to every object, so a symbol defined in one object and
+    //! referenced from a sibling (e.g. `ring`'s `ring_core_*` asm routines) is
     //! rewritten identically on both sides and stays linkable. These tests pin that
-    //! behavior down on synthetic COFF objects built with `object::write`, the same
-    //! def/ref shape used to reproduce the original `ring` static-link failure.
+    //! down on synthetic COFF objects built with `object::write`, the same def/ref
+    //! shape that reproduced the original `ring` static-link failure.
 
     use super::*;
     use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
