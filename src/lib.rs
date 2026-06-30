@@ -35,9 +35,18 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 ///
 /// The COFF backend localizes per object without a relink (unlike the Linux/Apple
 /// `ld -r` paths), so localizing such a symbol orphans the definition and turns the
-/// sibling's reference into a malformed `Static` + `SectionNumber == 0` entry. That
-/// covers `ring`'s asm routines (`ring_core_*`) and `rust_eh_personality` (every
-/// landing pad references it).
+/// sibling's reference into a malformed `Static` + `SectionNumber == 0` entry. This
+/// covers `ring`'s asm routines (`ring_core_*`), which `ring` bundles in dedicated
+/// objects and calls from others. Keeping them global also makes the archive
+/// self-contained without forcing a duplicate-symbol clash: `ring` reaches a Rust
+/// consumer only as an on-demand rlib, so the patched archive satisfies the
+/// references first and the consumer's `libring` members are never pulled.
+///
+/// `rust_eh_personality` is deliberately *not* here: `libstd` is always linked into
+/// a Rust consumer and defines it, so keeping it global would force a duplicate. It
+/// is localized instead (like `__rust_alloc`), and its undefined cross-object
+/// references stay `External` via the section-0 guard and bind to the consumer's
+/// `libstd`.
 ///
 /// Only consulted when [`protect_cross_object_symbols`] is set (Windows GNU ABI);
 /// these symbols are still hidden on MSVC and on Linux/Apple.
@@ -47,17 +56,17 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 /// mirroring how prefix filtering strips the underscore when selecting symbols.
 fn coff_must_stay_global(name: &str) -> bool {
     let undecorated = name.strip_prefix('_').unwrap_or(name);
-    undecorated == "rust_eh_personality" || undecorated.starts_with("ring_core_")
+    undecorated.starts_with("ring_core_")
 }
 
 /// Whether the COFF backend should keep [`coff_must_stay_global`] symbols `External`
 /// rather than localizing them.
 ///
 /// This is needed for the Windows GNU ABI targets (`*-windows-gnu`,
-/// `*-windows-gnullvm`), where `ring`'s asm routines and `rust_eh_personality` are
-/// referenced across object boundaries and localizing them breaks static linking.
-/// The MSVC targets use a different exception-handling model and don't hit this, so
-/// the flag stays off there and those symbols are localized as before.
+/// `*-windows-gnullvm`), where `ring`'s asm routines are referenced across object
+/// boundaries and localizing them breaks static linking. The MSVC targets use a
+/// different exception-handling model and don't hit this, so the flag stays off
+/// there and those symbols are localized as before.
 ///
 /// The triplet is optional (the CLI and `build.rs` callers often omit it), so when
 /// it is absent we fall back to the resolved target environment, which Cargo exposes
@@ -1436,21 +1445,29 @@ mod tests {
         let (_, sc, sec) = find(&ref_syms, decorated);
         assert_eq!(*sc, 2, "decorated reference must stay External");
         assert_eq!(*sec, 0);
-
-        // The predicate also covers the decorated personality symbol.
-        assert!(coff_must_stay_global("_rust_eh_personality"));
     }
 
     #[test]
-    fn rust_eh_personality_stays_global() {
-        // In the default blocklist, but referenced cross-object by every landing
-        // pad, so it must not be localized on the COFF path.
+    fn rust_eh_personality_is_localized_but_references_stay_external() {
+        // `libstd` always defines `rust_eh_personality`, so keeping it global would
+        // force a duplicate-symbol clash in every Rust consumer. It is localized
+        // instead; its undefined cross-object references stay External (section-0
+        // guard) and bind to the consumer's `libstd`.
         let hide = default_symbol_blocklist();
+        assert!(hide.iter().any(|s| s == "rust_eh_personality"));
+
+        // Definition is localized (Static), even with protection on.
+        let def = patch_coff_object(&make_def_object("rust_eh_personality"), &hide, true).unwrap();
+        let def_syms = coff_symbols(&def);
+        assert_no_static_undefined(&def_syms);
+        assert_eq!(find(&def_syms, "rust_eh_personality").1, 3, "definition must localize");
+
+        // Undefined reference stays External so it can bind to libstd.
         let r = patch_coff_object(&make_ref_object("rust_eh_personality"), &hide, true).unwrap();
-        let syms = coff_symbols(&r);
-        assert_no_static_undefined(&syms);
-        let (_, sc, sec) = find(&syms, "rust_eh_personality");
-        assert_eq!(*sc, 2, "rust_eh_personality reference must stay External");
+        let ref_syms = coff_symbols(&r);
+        assert_no_static_undefined(&ref_syms);
+        let (_, sc, sec) = find(&ref_syms, "rust_eh_personality");
+        assert_eq!(*sc, 2, "reference must stay External undefined, not Static+section0");
         assert_eq!(*sec, 0);
     }
 
