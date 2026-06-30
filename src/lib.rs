@@ -41,8 +41,13 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 ///
 /// Only consulted when [`protect_cross_object_symbols`] is set (Windows GNU ABI);
 /// these symbols are still hidden on MSVC and on Linux/Apple.
+///
+/// 32-bit Windows GNU (`i686-*`) decorates C/asm externals with a leading
+/// underscore (e.g. `_ring_core_...`), so the undecorated form is matched too,
+/// mirroring how prefix filtering strips the underscore when selecting symbols.
 fn coff_must_stay_global(name: &str) -> bool {
-    name == "rust_eh_personality" || name.starts_with("ring_core_")
+    let undecorated = name.strip_prefix('_').unwrap_or(name);
+    undecorated == "rust_eh_personality" || undecorated.starts_with("ring_core_")
 }
 
 /// Whether the COFF backend should keep [`coff_must_stay_global`] symbols `External`
@@ -1411,6 +1416,29 @@ mod tests {
         let (_, sc, sec) = find(&ref_syms, RING_SYM);
         assert_eq!(*sc, 2, "ring_core reference must stay External (global)");
         assert_eq!(*sec, 0, "ring_core reference must remain undefined");
+    }
+
+    #[test]
+    fn underscore_decorated_ring_symbols_stay_global() {
+        // 32-bit Windows GNU (i686) decorates externals with a leading underscore,
+        // and `--filter-prefix ring_core_` selects them by their decorated name.
+        let decorated = "_ring_core_0_17_14__sha256_block_data_order_hw";
+        let hide = vec![decorated.to_string()];
+
+        let def = patch_coff_object(&make_def_object(decorated), &hide, true).unwrap();
+        let def_syms = coff_symbols(&def);
+        assert_no_static_undefined(&def_syms);
+        assert_eq!(find(&def_syms, decorated).1, 2, "decorated definition must stay External");
+
+        let r = patch_coff_object(&make_ref_object(decorated), &hide, true).unwrap();
+        let ref_syms = coff_symbols(&r);
+        assert_no_static_undefined(&ref_syms);
+        let (_, sc, sec) = find(&ref_syms, decorated);
+        assert_eq!(*sc, 2, "decorated reference must stay External");
+        assert_eq!(*sec, 0);
+
+        // The predicate also covers the decorated personality symbol.
+        assert!(coff_must_stay_global("_rust_eh_personality"));
     }
 
     #[test]
