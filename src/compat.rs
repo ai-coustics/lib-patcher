@@ -452,6 +452,13 @@ fn patch_coff_symbol_table(
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
 
+        // SectionNumber (i16 at offset 12); 0 == IMAGE_SYM_UNDEFINED. An undefined
+        // reference has no definition to hide, and localizing it makes a malformed
+        // Static + section-0 entry that breaks linking, so keep it global.
+        let section_number =
+            i16::from_le_bytes([data[symbol_offset + 12], data[symbol_offset + 13]]);
+        let is_undefined = section_number == 0;
+
         let matches_filter = !symbols_to_hide.iter().any(|pattern| {
             if pattern.ends_with('*') {
                 let prefix = &pattern[..pattern.len() - 1];
@@ -461,10 +468,10 @@ fn patch_coff_symbol_table(
             }
         });
 
-        // Symbols not in the blocklist stay global. (COMDAT leaders are kept
-        // global implicitly: they only get hidden when blocklisted, which is
-        // the intended behavior.)
-        let keep_global = is_special || matches_filter;
+        // Symbols not in the blocklist stay global, as do undefined references.
+        // (COMDAT leaders are kept global implicitly: they only get hidden when
+        // blocklisted, which is the intended behavior.)
+        let keep_global = is_special || is_undefined || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -559,6 +566,17 @@ fn patch_coff_bigobj_symbol_table(
 
         let is_special = name.starts_with('@');
 
+        // SectionNumber (i32 at offset 12 in bigobj); 0 == IMAGE_SYM_UNDEFINED.
+        // See the note in patch_coff_symbol_table: never localize an undefined
+        // reference, or it becomes a malformed Static + section-0 entry.
+        let section_number = i32::from_le_bytes([
+            data[symbol_offset + 12],
+            data[symbol_offset + 13],
+            data[symbol_offset + 14],
+            data[symbol_offset + 15],
+        ]);
+        let is_undefined = section_number == 0;
+
         let matches_filter = !symbols_to_hide.iter().any(|pattern| {
             if pattern.ends_with('*') {
                 let prefix = &pattern[..pattern.len() - 1];
@@ -568,10 +586,10 @@ fn patch_coff_bigobj_symbol_table(
             }
         });
 
-        // Symbols not in the blocklist stay global. (COMDAT leaders are kept
-        // global implicitly: they only get hidden when blocklisted, which is
-        // the intended behavior.)
-        let keep_global = is_special || matches_filter;
+        // Symbols not in the blocklist stay global, as do undefined references.
+        // (COMDAT leaders are kept global implicitly: they only get hidden when
+        // blocklisted, which is the intended behavior.)
+        let keep_global = is_special || is_undefined || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
@@ -1063,4 +1081,125 @@ pub fn filter_symbols_by_prefix(
         .collect();
 
     Ok(filtered)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the blocklist COFF path.
+
+    use super::*;
+    use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
+    use object::{
+        Architecture, BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind,
+        SymbolScope,
+    };
+
+    /// Storage class of the primary entry for `name`, or `None` if absent.
+    fn storage_class_of(data: &[u8], name: &str) -> Option<u8> {
+        use object::LittleEndian as LE;
+        use object::pe;
+        use object::read::coff::CoffHeader;
+
+        let mut offset = 0u64;
+        let header = pe::ImageFileHeader::parse(data, &mut offset).unwrap();
+        let sym_off = header.pointer_to_symbol_table.get(LE) as usize;
+        let count = header.number_of_symbols.get(LE) as usize;
+        let str_off = sym_off + count * 18;
+
+        let mut i = 0;
+        while i < count {
+            let so = sym_off + i * 18;
+            let entry = &data[so..so + 18];
+            let n_aux = entry[17] as usize;
+            let sym_name = if entry[0..4] == [0, 0, 0, 0] {
+                let strofs = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize;
+                read_coff_string(data, str_off + strofs).unwrap()
+            } else {
+                let end = entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
+                String::from_utf8_lossy(&entry[0..end]).to_string()
+            };
+            if sym_name == name {
+                return Some(entry[16]);
+            }
+            i += 1 + n_aux;
+        }
+        None
+    }
+
+    /// Object that *references* `name` as an undefined external (section 0).
+    fn make_ref_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 16);
+        let sym = obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        obj.add_relocation(
+            text,
+            Relocation {
+                offset: off + 1,
+                symbol: sym,
+                addend: -4,
+                flags: RelocationFlags::Coff {
+                    typ: object::pe::IMAGE_REL_AMD64_REL32,
+                },
+            },
+        )
+        .unwrap();
+        obj.write().unwrap()
+    }
+
+    /// Object that *defines* `name` in `.text` as an external (global) symbol.
+    fn make_def_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0x90, 0x90, 0xc3], 16);
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: off,
+            size: 3,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
+    #[test]
+    fn undefined_blocklisted_reference_is_not_localized() {
+        // An object that only references a blocklisted symbol (undefined, section 0)
+        // must keep it External. Localizing it emits a malformed Static + section-0
+        // entry that fails at link.
+        let hide = default_symbol_blocklist();
+        assert!(hide.iter().any(|s| s == "rust_eh_personality"));
+        let patched = patch_coff_object(&make_ref_object("rust_eh_personality"), &hide).unwrap();
+        assert_eq!(
+            storage_class_of(&patched, "rust_eh_personality"),
+            Some(2),
+            "undefined blocklisted reference must stay External"
+        );
+    }
+
+    #[test]
+    fn defined_blocklisted_symbol_is_still_localized() {
+        // The guard must not disable hiding: a defined blocklisted symbol is still
+        // flipped to Static.
+        let hide = default_symbol_blocklist();
+        assert!(hide.iter().any(|s| s == "__rust_alloc"));
+        let patched = patch_coff_object(&make_def_object("__rust_alloc"), &hide).unwrap();
+        assert_eq!(
+            storage_class_of(&patched, "__rust_alloc"),
+            Some(3),
+            "defined blocklisted symbol must be localized to Static"
+        );
+    }
 }
