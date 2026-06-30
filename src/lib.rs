@@ -37,9 +37,24 @@ pub fn default_symbol_blocklist() -> Vec<String> {
 /// `ld -r` paths), so localizing such a symbol orphans the definition and turns the
 /// sibling's reference into a malformed `Static` + `SectionNumber == 0` entry. That
 /// covers `ring`'s asm routines (`ring_core_*`) and `rust_eh_personality` (every
-/// landing pad references it). Both are still safely hidden on Linux/Apple.
+/// landing pad references it).
+///
+/// Only consulted when [`protect_cross_object_symbols`] is set (Windows GNU ABI);
+/// these symbols are still hidden on MSVC and on Linux/Apple.
 fn coff_must_stay_global(name: &str) -> bool {
     name == "rust_eh_personality" || name.starts_with("ring_core_")
+}
+
+/// Whether the COFF backend should keep [`coff_must_stay_global`] symbols `External`
+/// rather than localizing them.
+///
+/// This is needed for the Windows GNU ABI targets (`*-windows-gnu`,
+/// `*-windows-gnullvm`), where `ring`'s asm routines and `rust_eh_personality` are
+/// referenced across object boundaries and localizing them breaks static linking.
+/// The MSVC targets use a different exception-handling model and don't hit this, so
+/// the flag stays off there and those symbols are localized as before.
+fn protect_cross_object_symbols(target_os: &str, triplet: Option<&str>) -> bool {
+    target_os == "windows" && triplet.is_some_and(|t| t.contains("windows-gnu"))
 }
 
 /// Patches a static library to hide specific symbols.
@@ -127,6 +142,8 @@ pub fn patch_lib(
     let detected_arch = detect_archive_arch(static_lib);
     let final_arch = target_arch.map(|s| s.to_string()).unwrap_or(detected_arch);
 
+    let protect_cross_object = protect_cross_object_symbols(&target_os, target_triplet);
+
     match target_os.as_str() {
         "windows" => patch_windows(
             static_lib,
@@ -135,6 +152,7 @@ pub fn patch_lib(
             symbols_to_hide,
             final_lib,
             &final_arch,
+            protect_cross_object,
         ),
         "macos" | "ios" | "tvos" | "visionos" => patch_apple(
             static_lib,
@@ -157,7 +175,13 @@ pub fn patch_lib(
 
     // Verify the patched library
     eprintln!("\nVerifying patched library...");
-    if let Err(e) = verify_patched_lib(final_lib, static_lib, symbols_to_hide, &target_os) {
+    if let Err(e) = verify_patched_lib(
+        final_lib,
+        static_lib,
+        symbols_to_hide,
+        &target_os,
+        protect_cross_object,
+    ) {
         eprintln!("\n❌ VERIFICATION FAILED: {}", e);
         eprintln!("The patched library may be corrupted or incomplete.");
         std::process::exit(1);
@@ -172,6 +196,7 @@ fn patch_windows(
     symbols_to_hide: &[String],
     final_lib: &Path,
     target_arch: &str,
+    protect_cross_object: bool,
 ) {
     let temp_dir = out_dir.join(format!("{}_objs", lib_name));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
@@ -193,7 +218,7 @@ fn patch_windows(
         let idx = obj_files.len();
 
         // Patch the COFF object file
-        match patch_coff_object(&data, symbols_to_hide) {
+        match patch_coff_object(&data, symbols_to_hide, protect_cross_object) {
             Ok(patched_data) => {
                 let patched_path = temp_dir.join(format!("{}_patched.obj", idx));
                 fs::write(&patched_path, patched_data).expect("Failed to write patched object");
@@ -368,15 +393,17 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
 fn patch_coff_object(
     data: &[u8],
     symbols_to_hide: &[String],
+    protect_cross_object: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // For Windows COFF, we patch the symbol table directly instead of rewriting
     // the entire object to preserve weak symbol auxiliary data and other COFF-specific info
-    patch_coff_symbol_table(data, symbols_to_hide)
+    patch_coff_symbol_table(data, symbols_to_hide, protect_cross_object)
 }
 
 fn patch_coff_symbol_table(
     data: &[u8],
     symbols_to_hide: &[String],
+    protect_cross_object: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use object::LittleEndian as LE;
     use object::pe;
@@ -390,7 +417,7 @@ fn patch_coff_symbol_table(
     let is_bigobj = data.len() >= 4 && data[0..2] == [0x00, 0x00] && data[2..4] == [0xFF, 0xFF];
 
     if is_bigobj {
-        return patch_coff_bigobj_symbol_table(data, symbols_to_hide);
+        return patch_coff_bigobj_symbol_table(data, symbols_to_hide, protect_cross_object);
     }
 
     let mut offset = 0u64;
@@ -483,10 +510,12 @@ fn patch_coff_symbol_table(
         });
 
         // Keep global unless it's a defined symbol that matches the hide list and
-        // isn't otherwise protected (special `@`-symbol, undefined reference, or
-        // cross-object symbol; see `coff_must_stay_global`).
-        let keep_global =
-            is_special || is_undefined || coff_must_stay_global(&name) || matches_filter;
+        // isn't otherwise protected (special `@`-symbol, undefined reference, or a
+        // cross-object symbol when that protection is active).
+        let keep_global = is_special
+            || is_undefined
+            || (protect_cross_object && coff_must_stay_global(&name))
+            || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -506,6 +535,7 @@ fn patch_coff_symbol_table(
 fn patch_coff_bigobj_symbol_table(
     mut data: Vec<u8>,
     symbols_to_hide: &[String],
+    protect_cross_object: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Big obj format has a 56-byte header
     // Offset 48: pointer to symbol table (u32)
@@ -601,8 +631,10 @@ fn patch_coff_bigobj_symbol_table(
         });
 
         // See the note in `patch_coff_symbol_table` for the keep-global rule.
-        let keep_global =
-            is_special || is_undefined || coff_must_stay_global(&name) || matches_filter;
+        let keep_global = is_special
+            || is_undefined
+            || (protect_cross_object && coff_must_stay_global(&name))
+            || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
@@ -1033,6 +1065,7 @@ fn verify_patched_lib(
     original_lib: &Path,
     symbols_to_hide: &[String],
     target_os: &str,
+    protect_cross_object: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Check that output file exists
     if !static_lib.exists() {
@@ -1076,9 +1109,12 @@ fn verify_patched_lib(
     // 4. Verify the filtering worked as expected
     // Check that blocked symbols are either gone or made local
     // (We can't easily check if they're local vs gone, but at least they shouldn't be global)
+    // Cross-object symbols (e.g. `ring_core_*`, `rust_eh_personality`) are
+    // deliberately kept global on the Windows GNU path, so exempt them there.
     let still_global: Vec<_> = symbols
         .iter()
         .filter(|s| symbols_to_hide.contains(&s.to_string()))
+        .filter(|s| !(protect_cross_object && coff_must_stay_global(s)))
         .collect();
 
     if !still_global.is_empty() {
@@ -1336,7 +1372,7 @@ mod tests {
         let hide = vec!["ring_core_*".to_string()];
 
         // Defining object: must stay External and in its section so siblings bind.
-        let def = patch_coff_object(&make_def_object(RING_SYM), &hide).unwrap();
+        let def = patch_coff_object(&make_def_object(RING_SYM), &hide, true).unwrap();
         let def_syms = coff_symbols(&def);
         assert_no_static_undefined(&def_syms);
         let (_, sc, sec) = find(&def_syms, RING_SYM);
@@ -1344,7 +1380,7 @@ mod tests {
         assert!(*sec > 0, "ring_core definition must stay in its section");
 
         // Referencing object: must stay External undefined (section 0), not Static.
-        let r = patch_coff_object(&make_ref_object(RING_SYM), &hide).unwrap();
+        let r = patch_coff_object(&make_ref_object(RING_SYM), &hide, true).unwrap();
         let ref_syms = coff_symbols(&r);
         assert_no_static_undefined(&ref_syms);
         let (_, sc, sec) = find(&ref_syms, RING_SYM);
@@ -1357,7 +1393,7 @@ mod tests {
         // In the default blocklist, but referenced cross-object by every landing
         // pad, so it must not be localized on the COFF path.
         let hide = default_symbol_blocklist();
-        let r = patch_coff_object(&make_ref_object("rust_eh_personality"), &hide).unwrap();
+        let r = patch_coff_object(&make_ref_object("rust_eh_personality"), &hide, true).unwrap();
         let syms = coff_symbols(&r);
         assert_no_static_undefined(&syms);
         let (_, sc, sec) = find(&syms, "rust_eh_personality");
@@ -1367,11 +1403,11 @@ mod tests {
 
     #[test]
     fn undefined_reference_is_never_localized() {
-        // Even a non-protected symbol must not be localized where it is only
-        // referenced (undefined); that is what creates the malformed entry.
+        // Holds even with cross-object protection off: an undefined reference is
+        // never localized, since that is what creates the malformed entry.
         let hide = vec!["_ZN3std6foobar".to_string()];
         let name = "_ZN3std6foobar";
-        let r = patch_coff_object(&make_ref_object(name), &hide).unwrap();
+        let r = patch_coff_object(&make_ref_object(name), &hide, false).unwrap();
         let syms = coff_symbols(&r);
         assert_no_static_undefined(&syms);
         let (_, sc, sec) = find(&syms, name);
@@ -1385,11 +1421,42 @@ mod tests {
         // on the hide list must still be flipped to Static.
         let hide = vec!["unpatched_function".to_string()];
         let name = "unpatched_function";
-        let def = patch_coff_object(&make_def_object(name), &hide).unwrap();
+        let def = patch_coff_object(&make_def_object(name), &hide, false).unwrap();
         let syms = coff_symbols(&def);
         assert_no_static_undefined(&syms); // defined (section > 0), so not malformed
         let (_, sc, sec) = find(&syms, name);
         assert_eq!(*sc, 3, "a defined, non-protected hidden symbol must become Static");
         assert!(*sec > 0);
+    }
+
+    #[test]
+    fn cross_object_protection_gates_on_windows_gnu_abi() {
+        let gnu = |t| protect_cross_object_symbols("windows", Some(t));
+        assert!(gnu("x86_64-pc-windows-gnu"));
+        assert!(gnu("x86_64-pc-windows-gnullvm"));
+        assert!(!gnu("x86_64-pc-windows-msvc"));
+        // Off for non-Windows and when the triplet is unknown.
+        assert!(!protect_cross_object_symbols("linux", Some("x86_64-unknown-linux-gnu")));
+        assert!(!protect_cross_object_symbols("windows", None));
+    }
+
+    #[test]
+    fn ring_definition_is_localized_without_protection() {
+        // On non-GNU Windows (e.g. MSVC) the protection is off, so a hide-list match
+        // is localized as usual; the `is_undefined` guard still prevents the
+        // malformed entry on the reference side.
+        let hide = vec!["ring_core_*".to_string()];
+
+        let def = patch_coff_object(&make_def_object(RING_SYM), &hide, false).unwrap();
+        let def_syms = coff_symbols(&def);
+        assert_no_static_undefined(&def_syms);
+        assert_eq!(find(&def_syms, RING_SYM).1, 3, "definition must localize to Static");
+
+        let r = patch_coff_object(&make_ref_object(RING_SYM), &hide, false).unwrap();
+        let ref_syms = coff_symbols(&r);
+        assert_no_static_undefined(&ref_syms);
+        let (_, sc, sec) = find(&ref_syms, RING_SYM);
+        assert_eq!(*sc, 2, "reference must stay External undefined, not Static+section0");
+        assert_eq!(*sec, 0);
     }
 }
