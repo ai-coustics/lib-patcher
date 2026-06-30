@@ -109,7 +109,7 @@ pub fn patch_lib(
 ///
 /// Returns `None` for triplets that do not clearly identify an OS, so the
 /// caller can fall back to the environment or host detection.
-fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
+pub(crate) fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
     if triplet.contains("windows") {
         Some("windows")
     } else if triplet.contains("apple-ios") {
@@ -151,13 +151,18 @@ mod linux;
 mod macos;
 mod windows;
 
+// Deprecated blocklist code path, preserved for backward compatibility.
+mod compat;
+
 use linux::patch_linux;
 use macos::patch_macos;
 use windows::patch_windows;
 
+pub use compat::{default_symbol_blocklist, filter_symbols_by_prefix, patch_lib_blocklist};
+
 /// Detects the architecture of a static library by examining the first object file
 /// Works for all platforms: macOS (Mach-O), Linux (ELF), Windows (COFF/PE)
-fn detect_archive_arch(static_lib: &Path) -> String {
+pub(crate) fn detect_archive_arch(static_lib: &Path) -> String {
     use std::io::Read;
 
     let archive_file = match fs::File::open(static_lib) {
