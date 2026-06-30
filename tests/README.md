@@ -18,11 +18,17 @@ A C program that links against the patched static library:
 - Uses Makefile for Linux/macOS, cl.exe for Windows
 
 ### 3. `rust-consumer/` - Rust Integration Test
-A Rust program built with a **different Rust version** (beta vs stable):
-- Tests that the patched library doesn't conflict with the consumer's stdlib
-- Uses its own versions of rand, serde, etc.
+A Rust program that links the patched static library:
+- Uses its **own versions** of rand, serde, etc. (e.g. rand 0.9 vs testlib's 0.8)
+- Tests that the patched library doesn't conflict with the consumer's stdlib or
+  its (possibly identical) dependency symbols
 - Verifies no symbol conflicts occur after patching
 - This is the critical test for the symbol hiding functionality
+
+Because lib-patcher now uses an allowlist (keep only `testlib_*`, hide everything
+else), this works regardless of whether the consumer is built with the same or a
+different Rust toolchain — every non-API symbol is localized/renamed, so there is
+nothing left to collide.
 
 ## Running Tests
 
@@ -56,8 +62,8 @@ make
 
 # 5. Run Rust test
 cd tests/rust-consumer
-cargo +beta build --release
-cargo +beta run --release
+cargo build --release
+cargo run --release
 ```
 
 ### CI Testing
@@ -73,7 +79,7 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
 2. **C FFI**: C code can successfully link and call the patched library
-3. **Cross-Version Rust**: A Rust program with different stdlib/dependency versions can link without conflicts
+3. **Conflict-Free Linking**: A Rust program with its own (possibly identical) stdlib/dependency versions can link the patched library without conflicts
 4. **Platform Coverage**: Tests run on Linux, macOS, and Windows
 5. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
 
@@ -81,14 +87,15 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 The previous examples folder was too simplistic. This test suite addresses the real-world scenario:
 - Third-party static libraries built with Rust
-- Need to integrate into projects with different Rust versions
+- Need to integrate into projects that pull in the same stdlib and dependencies
 - Symbol conflicts from stdlib and common dependencies
 - Cross-platform compatibility requirements
 
 By testing with:
-- A library built with **stable** Rust
-- A consumer built with **beta** Rust
-- Heavy use of stdlib and common crates
+- A library and a consumer that both use stdlib and common crates (rand, serde)
+- A consumer that brings its own dependency versions
 - Both C and Rust consumers
 
-We ensure that `lib-patcher` solves the actual problem it was designed for.
+We ensure that `lib-patcher` solves the actual problem it was designed for: the
+allowlist keeps only the public API and hides everything else, so the consumer's
+own copies of those symbols never clash with the library's.

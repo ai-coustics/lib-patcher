@@ -193,10 +193,7 @@ cd tests/testlib && cargo build --release
 # Test from C
 cd tests/c-consumer && make && ./testlib-test
 
-# Test from Rust with same stdlib version
-cd tests/rust-consumer-stable && cargo build --release && ./target/release/rust-consumer
-
-# Test from Rust with different stdlib version
+# Test from Rust (consumer pulls in its own rand/serde/serde_json)
 cd tests/rust-consumer && cargo build --release && ./target/release/rust-consumer
 ```
 
@@ -205,10 +202,10 @@ cd tests/rust-consumer && cargo build --release && ./target/release/rust-consume
 - **Real dependencies**: Uses rand, serde, serde_json to generate realistic symbol conflicts
 - **Symbol hiding**: Hides ~2800+ Rust stdlib/dependency symbols while keeping 8 API functions
 - **C interop**: C code successfully links and calls the patched library
-- **Same-version Rust**: A Rust program with the **same stdlib version** can link without conflicts
+- **Conflict-free Rust**: A Rust program with its own (possibly identical) stdlib/dependency versions can link without conflicts
 - **Platform coverage**: CI runs on Linux, macOS, and Windows
 
-The `rust-consumer-stable` test is the critical one - it uses the same Rust version and same dependencies (serde_json, rand) as the library. Without patching, this would fail with duplicate symbol errors. With patching, it works perfectly.
+The `rust-consumer` test is the critical one - it uses the same dependencies (serde_json, rand) as the library. Without patching, this would fail with duplicate symbol errors. With patching, every non-API symbol is hidden, so it works regardless of the consumer's toolchain.
 
 ## Inspiration
 

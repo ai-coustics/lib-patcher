@@ -11,9 +11,10 @@ There is a CLI tool called lib-patcher and a direct library usage.
 Test projects are defined in the tests directory.
 The testlib is the library with contains a lot of rust std symbols and needs to be patched.
 
-The rust-consumer is trying to use the patched library with a different rust version.
-
-The rust-consumer-stable is trying to use the patched library with the same rust version.
+The rust-consumer is trying to use the patched library, pulling in its own
+versions of the same dependencies (rand, serde, serde_json) to prove there are no
+symbol conflicts. (The allowlist hides every non-API symbol, so this works
+regardless of the consumer's Rust toolchain.)
 
 The c-consumer is trying to use the patched library from a C project.
 

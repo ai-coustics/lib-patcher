@@ -27,9 +27,6 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust beta
-        uses: dtolnay/rust-toolchain@beta
-
       - name: Build lib-patcher CLI
         run: cargo build --release
 
@@ -82,34 +79,18 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      - name: Build and run Rust test (different version) (Linux/macOS)
+      - name: Build and run Rust test (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           cd tests/rust-consumer
-          cargo +beta build --release
-          cargo +beta run --release
+          cargo build --release
+          cargo run --release
         shell: bash
 
-      - name: Build and run Rust test (different version) (Windows)
+      - name: Build and run Rust test (Windows)
         if: runner.os == 'Windows'
         run: |
           cd tests/rust-consumer
-          cargo +beta build --release
-          cargo +beta run --release
-        shell: pwsh
-
-      - name: Build and run Rust test (same version) (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          cd tests/rust-consumer-stable
-          cargo +stable build --release
-          cargo +stable run --release
-        shell: bash
-
-      - name: Build and run Rust test (same version) (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd tests/rust-consumer-stable
-          cargo +stable build --release
-          cargo +stable run --release
+          cargo build --release
+          cargo run --release
         shell: pwsh

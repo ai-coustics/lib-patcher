@@ -62,7 +62,7 @@ fi
 echo "✓ C test passed"
 echo ""
 
-echo "Step 5: Test from Rust (different version)"
+echo "Step 5: Test from Rust (different dependency versions)"
 echo "------------------------------------"
 cd "$SCRIPT_DIR/rust-consumer"
 cargo build --release
