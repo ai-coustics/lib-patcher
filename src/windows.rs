@@ -148,12 +148,18 @@ pub(crate) fn patch_windows(
     };
 
     let mut cmd = Command::new(&lib_cmd.tool);
+    // Run from the temp dir and pass bare filenames so the archive stores
+    // relative member names. Passing absolute paths would embed the build
+    // location (and PID-based temp dir) into the library, making it
+    // non-reproducible and tied to where it was built. All patched_files live
+    // in temp_dir, so their file names are unambiguous.
+    cmd.current_dir(&temp_dir);
 
     if lib_cmd.is_llvm {
         cmd.arg("rc");
         cmd.arg(&final_lib_abs);
         for obj in &patched_files {
-            cmd.arg(obj);
+            cmd.arg(obj.file_name().expect("patched object has no file name"));
         }
     } else {
         cmd.arg("/nologo");
@@ -162,7 +168,7 @@ pub(crate) fn patch_windows(
         }
         cmd.arg(format!("/OUT:{}", final_lib_abs.display()));
         for obj in &patched_files {
-            cmd.arg(obj);
+            cmd.arg(obj.file_name().expect("patched object has no file name"));
         }
     }
 
