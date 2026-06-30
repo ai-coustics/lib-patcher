@@ -36,6 +36,19 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     }
 }
 
+/// Whether `data` is a regular COFF object that the renamer can rewrite and the
+/// archiver can store.
+///
+/// Non-COFF archive members — LLVM bitcode emitted for LTO, or import
+/// descriptors — return `false`. `llvm-objcopy` rejects them ("unsupported
+/// object file format"), and, more importantly, passing them on to `lib.exe`
+/// can crash the librarian (`LNK1000`). They are duplicates of, or metadata for,
+/// the native COFF members, so they are dropped from the output — matching the
+/// in-place COFF patcher, which likewise skipped anything it could not parse.
+fn is_patchable_coff(data: &[u8]) -> bool {
+    matches!(File::parse(data), Ok(file) if file.format() == object::BinaryFormat::Coff)
+}
+
 /// Decides how a *defined* global symbol is treated under the allowlist.
 ///
 /// Returns `Some(new_name)` when the symbol must be renamed under `keep_prefix`
@@ -99,7 +112,7 @@ pub(crate) fn patch_windows(
         let idx = obj_files.len();
         let obj_path = temp_dir.join(format!("{}.obj", idx));
         fs::write(&obj_path, data).expect("Failed to write object file");
-        obj_files.push(obj_path);
+        obj_files.push((obj_path, is_patchable_coff(data)));
 
         // Parse object file to find defined symbols
         collect_defined_globals(data, &mut defined_symbols);
@@ -153,7 +166,15 @@ pub(crate) fn patch_windows(
 
     let mut patched_files = Vec::new();
 
-    for (i, obj_path) in obj_files.iter().enumerate() {
+    for (i, (obj_path, is_coff)) in obj_files.iter().enumerate() {
+        // Drop non-COFF members (LLVM bitcode, import descriptors): they carry no
+        // symbols to rename, llvm-objcopy can't process them, and archiving them
+        // can crash lib.exe (LNK1000). The native code lives in COFF members.
+        if !is_coff {
+            eprintln!("Skipping non-COFF object {} (not archived).", i);
+            continue;
+        }
+
         let patched_path = temp_dir.join(format!("{}_patched.obj", i));
 
         let status = Command::new(&objcopy)
@@ -163,12 +184,17 @@ pub(crate) fn patch_windows(
             .status()
             .expect("Failed to execute llvm-objcopy");
 
-        if !status.success() {
-            eprintln!("Warning: llvm-objcopy failed on object {}. Skipping.", i);
-            // Fallback: use original object if patch fails (might be non-COFF or weird)
-            patched_files.push(obj_path.clone());
-        } else {
+        if status.success() {
             patched_files.push(patched_path);
+        } else {
+            // A genuine COFF object objcopy couldn't rewrite: keep the original
+            // (valid COFF, just unrenamed) so its code is preserved. lib.exe
+            // handles COFF fine, so this won't crash the librarian.
+            eprintln!(
+                "Warning: llvm-objcopy failed on COFF object {}; keeping it unrenamed.",
+                i
+            );
+            patched_files.push(obj_path.clone());
         }
     }
 
@@ -570,6 +596,17 @@ mod tests {
             map.get("some_internal_function").map(String::as_str),
             Some(format!("{PREFIX}some_internal_function").as_str()),
         );
+    }
+
+    #[test]
+    fn only_coff_objects_are_archived() {
+        // Real COFF objects are patchable and kept.
+        assert!(is_patchable_coff(&make_def_object(RING_SYM)));
+        assert!(is_patchable_coff(&make_ref_object(RING_SYM)));
+        // Non-COFF members must be rejected so they are never fed to lib.exe:
+        // LLVM bitcode (BC\xC0\xDE magic) and arbitrary garbage.
+        assert!(!is_patchable_coff(&[0x42, 0x43, 0xc0, 0xde, 0, 0, 0, 0]));
+        assert!(!is_patchable_coff(b"not an object file"));
     }
 
     #[test]
