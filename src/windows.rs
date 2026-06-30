@@ -58,7 +58,11 @@ fn is_patchable_coff(data: &[u8]) -> bool {
 /// cross-object asm routines and their `i686`-decorated `_`-prefixed spellings,
 /// which need no special-casing because the rename is purely name-based.
 fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
-    if symbol.starts_with(keep_prefix) {
+    // 32-bit Windows decorates extern "C"/no_mangle exports with a leading
+    // underscore (e.g. `_testlib_add`), so test the stripped form too, as the
+    // verifier does. Otherwise public API would be renamed out of reach.
+    let unprefixed = symbol.strip_prefix('_').unwrap_or(symbol);
+    if symbol.starts_with(keep_prefix) || unprefixed.starts_with(keep_prefix) {
         return None;
     }
     // MSVC-mangled names (??...) must be left alone; everything else (including
@@ -613,6 +617,20 @@ mod tests {
         assert_eq!(
             rename_target("internal", PREFIX),
             Some("myapp_internal".to_string())
+        );
+    }
+
+    #[test]
+    fn underscore_decorated_public_symbol_stays_public() {
+        // 32-bit Windows decorates extern "C"/no_mangle exports with a leading
+        // underscore. `_testlib_add` is public API under `--keep-prefix testlib_`
+        // and must not be renamed (which would hide it as `testlib__testlib_add`).
+        assert_eq!(rename_target("_testlib_add", "testlib_"), None);
+        assert_eq!(rename_target("testlib_add", "testlib_"), None);
+        // A non-public underscore-decorated symbol is still renamed.
+        assert_eq!(
+            rename_target("_internal", "testlib_"),
+            Some("testlib__internal".to_string())
         );
     }
 }
