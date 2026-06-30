@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use object::ObjectComdat;
 use object::read::File;
 use object::{Object as ObjectTrait, ObjectSymbol};
 
@@ -29,6 +28,18 @@ pub fn default_symbol_blocklist() -> Vec<String> {
         "__rust_alloc_zeroed".to_string(),
         "__rust_alloc_error_handler".to_string(),
     ]
+}
+
+/// Symbols that must stay `External` on the COFF path even if they match the hide
+/// list, because they are defined in one object and referenced from a sibling.
+///
+/// The COFF backend localizes per object without a relink (unlike the Linux/Apple
+/// `ld -r` paths), so localizing such a symbol orphans the definition and turns the
+/// sibling's reference into a malformed `Static` + `SectionNumber == 0` entry. That
+/// covers `ring`'s asm routines (`ring_core_*`) and `rust_eh_personality` (every
+/// landing pad references it). Both are still safely hidden on Linux/Apple.
+fn coff_must_stay_global(name: &str) -> bool {
+    name == "rust_eh_personality" || name.starts_with("ring_core_")
 }
 
 /// Patches a static library to hide specific symbols.
@@ -407,13 +418,6 @@ fn patch_coff_symbol_table(
     // Get string table offset (right after symbol table)
     let string_table_offset = symbol_table_end;
 
-    // Collect COMDAT symbols that should stay global
-    let file = File::parse(data.as_slice())?;
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
-
     let mut modified_count = 0;
 
     // Patch each symbol entry
@@ -463,6 +467,12 @@ fn patch_coff_symbol_table(
         // Check if symbol should remain global
         let is_special = name.starts_with('@');
 
+        // SectionNumber (i16 at offset 12); 0 == IMAGE_SYM_UNDEFINED, i.e. only
+        // referenced here, not defined. Localizing it would produce a malformed
+        // `Static` + section-0 entry, so always keep undefined symbols `External`.
+        let section_number = i16::from_le_bytes([data[symbol_offset + 12], data[symbol_offset + 13]]);
+        let is_undefined = section_number == 0;
+
         let matches_filter = !symbols_to_hide.iter().any(|pattern| {
             if pattern.ends_with('*') {
                 let prefix = &pattern[..pattern.len() - 1];
@@ -472,10 +482,11 @@ fn patch_coff_symbol_table(
             }
         });
 
-        // Keep COMDAT leader symbols global to preserve linker selection semantics,
-        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
-        let is_comdat = comdat_symbols.contains(&i);
-        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+        // Keep global unless it's a defined symbol that matches the hide list and
+        // isn't otherwise protected (special `@`-symbol, undefined reference, or
+        // cross-object symbol; see `coff_must_stay_global`).
+        let keep_global =
+            is_special || is_undefined || coff_must_stay_global(&name) || matches_filter;
 
         if !keep_global {
             // Change storage class to 3 (IMAGE_SYM_CLASS_STATIC = local/private)
@@ -522,13 +533,6 @@ fn patch_coff_bigobj_symbol_table(
     }
 
     let string_table_offset = symbol_table_end;
-
-    // Collect COMDAT symbols
-    let file = File::parse(data.as_slice())?;
-    let mut comdat_symbols = HashSet::new();
-    for comdat in file.comdats() {
-        comdat_symbols.insert(comdat.symbol().0);
-    }
 
     let mut modified_count = 0;
 
@@ -577,6 +581,16 @@ fn patch_coff_bigobj_symbol_table(
 
         let is_special = name.starts_with('@');
 
+        // SectionNumber here is a 4-byte (i32) field at offset 12; 0 == undefined.
+        // See the note in `patch_coff_symbol_table`.
+        let section_number = i32::from_le_bytes([
+            data[symbol_offset + 12],
+            data[symbol_offset + 13],
+            data[symbol_offset + 14],
+            data[symbol_offset + 15],
+        ]);
+        let is_undefined = section_number == 0;
+
         let matches_filter = !symbols_to_hide.iter().any(|pattern| {
             if pattern.ends_with('*') {
                 let prefix = &pattern[..pattern.len() - 1];
@@ -586,10 +600,9 @@ fn patch_coff_bigobj_symbol_table(
             }
         });
 
-        // Keep COMDAT leader symbols global to preserve linker selection semantics,
-        // UNLESS they're explicitly in the blocklist (e.g., Rust stdlib symbols)
-        let is_comdat = comdat_symbols.contains(&i);
-        let keep_global = is_special || (is_comdat && matches_filter) || matches_filter;
+        // See the note in `patch_coff_symbol_table` for the keep-global rule.
+        let keep_global =
+            is_special || is_undefined || coff_must_stay_global(&name) || matches_filter;
 
         if !keep_global {
             data[symbol_offset + 18] = 3; // IMAGE_SYM_CLASS_STATIC
@@ -1195,4 +1208,188 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
     let mut result: Vec<String> = symbols.into_iter().collect();
     result.sort();
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the Windows/COFF symbol-localization path.
+    //!
+    //! They reproduce the `ring` static-link failure: an asm routine (`ring_core_*`)
+    //! defined in one object and referenced from a sibling. The old code localized it
+    //! in both, turning the reference into a malformed `Static` + `SectionNumber = 0`
+    //! entry that lld rejects and GNU ld binds to address 0.
+
+    use super::*;
+    use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
+    use object::{
+        Architecture, BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind,
+        SymbolScope,
+    };
+
+    const RING_SYM: &str = "ring_core_0_17_14__sha256_block_data_order_hw";
+
+    /// `(name, storage_class, section_number)` for every primary symbol entry,
+    /// parsed straight from the COFF symbol table (auxiliary entries skipped).
+    fn coff_symbols(data: &[u8]) -> Vec<(String, u8, i16)> {
+        use object::LittleEndian as LE;
+        use object::pe;
+        use object::read::coff::CoffHeader;
+
+        let mut offset = 0u64;
+        let header = pe::ImageFileHeader::parse(data, &mut offset).unwrap();
+        let sym_off = header.pointer_to_symbol_table.get(LE) as usize;
+        let count = header.number_of_symbols.get(LE) as usize;
+        let str_off = sym_off + count * 18;
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < count {
+            let so = sym_off + i * 18;
+            let entry = &data[so..so + 18];
+            let storage = entry[16];
+            let section = i16::from_le_bytes([entry[12], entry[13]]);
+            let n_aux = entry[17] as usize;
+            let name = if entry[0..4] == [0, 0, 0, 0] {
+                let strofs = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize;
+                read_coff_string(data, str_off + strofs).unwrap()
+            } else {
+                let end = entry[0..8].iter().position(|&b| b == 0).unwrap_or(8);
+                String::from_utf8_lossy(&entry[0..end]).to_string()
+            };
+            out.push((name, storage, section));
+            i += 1 + n_aux;
+        }
+        out
+    }
+
+    /// Object A: *defines* `name` in `.text` as an external (global) symbol,
+    /// mirroring the ring object that contains the asm routine body.
+    fn make_def_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0x90, 0x90, 0xc3], 16); // nop; nop; ret
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: off,
+            size: 3,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
+    /// Object B: *references* `name` via a REL32 relocation (an external undefined
+    /// symbol), mirroring the ring object that calls into the asm routine.
+    fn make_ref_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        // e8 <rel32> = call rel32; c3 = ret. The rel32 placeholder is relocated.
+        let off = obj.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 16);
+        let sym = obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        obj.add_relocation(
+            text,
+            Relocation {
+                offset: off + 1,
+                symbol: sym,
+                addend: -4,
+                flags: RelocationFlags::Coff {
+                    typ: object::pe::IMAGE_REL_AMD64_REL32,
+                },
+            },
+        )
+        .unwrap();
+        obj.write().unwrap()
+    }
+
+    fn find<'a>(syms: &'a [(String, u8, i16)], name: &str) -> &'a (String, u8, i16) {
+        syms.iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("symbol `{name}` not found in patched object"))
+    }
+
+    /// The structural invariant: a `Static` (3) symbol in section 0 is malformed.
+    /// This is the precise, tool-agnostic signature of the bug.
+    fn assert_no_static_undefined(syms: &[(String, u8, i16)]) {
+        for (n, sc, sec) in syms {
+            assert!(
+                !(*sc == 3 && *sec == 0),
+                "symbol `{n}` is StorageClass=Static + SectionNumber=0 (malformed undefined)"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_intra_library_symbols_stay_global() {
+        // The consumer hides ring's symbols to avoid clashing with its own copy.
+        let hide = vec!["ring_core_*".to_string()];
+
+        // Defining object: must stay External and in its section so siblings bind.
+        let def = patch_coff_object(&make_def_object(RING_SYM), &hide).unwrap();
+        let def_syms = coff_symbols(&def);
+        assert_no_static_undefined(&def_syms);
+        let (_, sc, sec) = find(&def_syms, RING_SYM);
+        assert_eq!(*sc, 2, "ring_core definition must stay External (global)");
+        assert!(*sec > 0, "ring_core definition must stay in its section");
+
+        // Referencing object: must stay External undefined (section 0), not Static.
+        let r = patch_coff_object(&make_ref_object(RING_SYM), &hide).unwrap();
+        let ref_syms = coff_symbols(&r);
+        assert_no_static_undefined(&ref_syms);
+        let (_, sc, sec) = find(&ref_syms, RING_SYM);
+        assert_eq!(*sc, 2, "ring_core reference must stay External (global)");
+        assert_eq!(*sec, 0, "ring_core reference must remain undefined");
+    }
+
+    #[test]
+    fn rust_eh_personality_stays_global() {
+        // In the default blocklist, but referenced cross-object by every landing
+        // pad, so it must not be localized on the COFF path.
+        let hide = default_symbol_blocklist();
+        let r = patch_coff_object(&make_ref_object("rust_eh_personality"), &hide).unwrap();
+        let syms = coff_symbols(&r);
+        assert_no_static_undefined(&syms);
+        let (_, sc, sec) = find(&syms, "rust_eh_personality");
+        assert_eq!(*sc, 2, "rust_eh_personality reference must stay External");
+        assert_eq!(*sec, 0);
+    }
+
+    #[test]
+    fn undefined_reference_is_never_localized() {
+        // Even a non-protected symbol must not be localized where it is only
+        // referenced (undefined); that is what creates the malformed entry.
+        let hide = vec!["_ZN3std6foobar".to_string()];
+        let name = "_ZN3std6foobar";
+        let r = patch_coff_object(&make_ref_object(name), &hide).unwrap();
+        let syms = coff_symbols(&r);
+        assert_no_static_undefined(&syms);
+        let (_, sc, sec) = find(&syms, name);
+        assert_eq!(*sc, 2, "undefined reference must stay External");
+        assert_eq!(*sec, 0);
+    }
+
+    #[test]
+    fn ordinary_defined_symbol_is_still_localized() {
+        // Guard that the fix didn't disable hiding: a defined, non-protected symbol
+        // on the hide list must still be flipped to Static.
+        let hide = vec!["unpatched_function".to_string()];
+        let name = "unpatched_function";
+        let def = patch_coff_object(&make_def_object(name), &hide).unwrap();
+        let syms = coff_symbols(&def);
+        assert_no_static_undefined(&syms); // defined (section > 0), so not malformed
+        let (_, sc, sec) = find(&syms, name);
+        assert_eq!(*sc, 3, "a defined, non-protected hidden symbol must become Static");
+        assert!(*sec > 0);
+    }
 }
