@@ -93,13 +93,14 @@ fn main() {
 
     let temp_dir = get_temp_dir(args.temp_dir);
 
-    // --keep-prefix is required when patching; there is no other patching mode.
+    // --keep-prefix is required when patching and must be non-empty: an empty
+    // prefix would match every symbol and emit an unpatched library.
     let keep_prefix = match args.keep_prefix {
-        Some(prefix) => prefix,
-        None => {
+        Some(prefix) if !prefix.is_empty() => prefix,
+        _ => {
             eprintln!(
-                "Error: --keep-prefix <PREFIX> is required when patching. It keeps only\n\
-                 symbols with that prefix public and hides everything else."
+                "Error: --keep-prefix <PREFIX> is required when patching and must not be\n\
+                 empty. It keeps only symbols with that prefix public and hides everything else."
             );
             std::process::exit(1);
         }

@@ -46,6 +46,17 @@ pub fn patch_lib(
     target_arch: Option<&str>,
     target_triplet: Option<&str>,
 ) {
+    // An empty prefix matches every symbol (`starts_with("")` is always true), so
+    // the patchers would keep everything and the verifier would accept everything,
+    // silently emitting an unpatched library. Reject it rather than mislead.
+    if keep_prefix.is_empty() {
+        eprintln!(
+            "Error: keep_prefix must not be empty; an empty prefix keeps every symbol \
+             public and would emit an unpatched library."
+        );
+        std::process::exit(1);
+    }
+
     // Prefer the explicit triplet: when cross-compiling, the target OS differs
     // from both the host and CARGO_CFG_TARGET_OS (which is unset for the CLI).
     let target_os = target_triplet
