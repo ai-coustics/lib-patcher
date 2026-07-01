@@ -151,27 +151,10 @@ The following are always left alone because they are needed for linking:
 
 ## Testing
 
-Comprehensive integration tests verify the tool works across all platforms:
-
-```bash
-# Build the CLI tool
-cargo build --release
-
-# Build test library (uses rand, serde_json, lots of std symbols)
-cd tests/testlib && cargo build --release
-
-# Patch it
-./target/release/lib-patcher \
-  --input tests/testlib/target/release/libtestlib.a \
-  --output tests/testlib/target/release/libtestlib_patched.a \
-  --keep-prefix testlib_
-
-# Test from C
-cd tests/c-consumer && make && ./testlib-test
-
-# Test from Rust (consumer pulls in its own rand/serde/serde_json)
-cd tests/rust-consumer && cargo build --release && ./target/release/rust-consumer
-```
+Comprehensive integration tests verify the tool works across all platforms.
+See [`tests/README.md`](tests/README.md) for step-by-step instructions on
+Linux, macOS, and Windows, and [`.github/workflows/test.yml`](.github/workflows/test.yml)
+for the automated CI runs.
 
 ### What Gets Tested
 

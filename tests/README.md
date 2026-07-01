@@ -34,36 +34,60 @@ nothing left to collide.
 
 ### Local Testing
 
-```bash
-# From the tests directory
-./run_tests.sh
-```
+Run the full flow from the repository root. The builds use `--release`
+because a release static library is what users actually ship and patch.
 
-Or manually:
+#### Linux / macOS
 
 ```bash
-# 1. Build lib-patcher
+# 1. Build the lib-patcher CLI
 cargo build --release
 
-# 2. Build testlib
-cd tests/testlib
-cargo build --release
+# 2. Build the test library
+( cd tests/testlib && cargo build --release )
 
-# 3. Patch the library (keep only the testlib_ public API, hide everything else)
+# 3. Patch it: keep only the testlib_ public API, hide everything else
 ./target/release/lib-patcher \
   --input tests/testlib/target/release/libtestlib.a \
   --output tests/testlib/target/release/libtestlib_patched.a \
   --keep-prefix testlib_
 
-# 4. Run C test
-cd tests/c-consumer
-make
-./testlib-test
+# 4. Build and run the C consumer
+( cd tests/c-consumer && make && ./testlib-test )
 
-# 5. Run Rust test
-cd tests/rust-consumer
+# 5. Build and run the Rust consumer
+( cd tests/rust-consumer && cargo build --release && cargo run --release )
+```
+
+#### Windows
+
+Run from a Visual Studio Developer PowerShell so that `cl.exe` and `lib.exe`
+are on `PATH`. The static library uses the `.lib` extension here, and
+`/machine:` must match the target architecture (`x64`, `ARM64`, ...).
+
+```powershell
+# 1. Build the lib-patcher CLI
 cargo build --release
-cargo run --release
+
+# 2. Build the test library
+cd tests\testlib; cargo build --release; cd ..\..
+
+# 3. Patch it: keep only the testlib_ public API, hide everything else
+.\target\release\lib-patcher.exe `
+  --input tests\testlib\target\release\testlib.lib `
+  --output tests\testlib\target\release\testlib_patched.lib `
+  --keep-prefix testlib_
+
+# 4. Build and run the C consumer (ProcessPrng is imported from bcryptprimitives)
+cd tests\c-consumer
+lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
+cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib `
+  ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
+.\testlib-test.exe
+cd ..\..
+
+# 5. Build and run the Rust consumer
+cd tests\rust-consumer; cargo build --release; cargo run --release; cd ..\..
 ```
 
 ### CI Testing
