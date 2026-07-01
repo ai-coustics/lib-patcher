@@ -27,6 +27,16 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # testlib and the consumers are separate crates under tests/, each
+          # with its own target dir; include them so their deps are cached too.
+          workspaces: |
+            .
+            tests/testlib
+            tests/rust-consumer
+
       - name: Build lib-patcher CLI
         # Debug on purpose: the tool has no optimized behavior to test, but a
         # debug binary keeps overflow and debug_assert checks on while it patches
