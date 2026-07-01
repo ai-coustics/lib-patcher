@@ -93,8 +93,7 @@ fn main() {
 
     let temp_dir = get_temp_dir(args.temp_dir);
 
-    // --keep-prefix is required when patching. The old blocklist modes
-    // (--default / --symbols / --filter-prefix, or no flags at all) were removed.
+    // --keep-prefix is required when patching; there is no other patching mode.
     let keep_prefix = match args.keep_prefix {
         Some(prefix) => prefix,
         None => {
@@ -116,7 +115,7 @@ fn main() {
     );
 }
 
-/// Allowlist mode: keep only symbols matching `keep_prefix`, hide everything else.
+/// Keeps only symbols matching `keep_prefix` public and hides everything else.
 fn patch_allowlist(
     input: &std::path::Path,
     temp_dir: &std::path::Path,

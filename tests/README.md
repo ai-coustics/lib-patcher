@@ -25,9 +25,9 @@ A Rust program that links the patched static library:
 - Verifies no symbol conflicts occur after patching
 - This is the critical test for the symbol hiding functionality
 
-Because lib-patcher now uses an allowlist (keep only `testlib_*`, hide everything
-else), this works regardless of whether the consumer is built with the same or a
-different Rust toolchain — every non-API symbol is localized/renamed, so there is
+lib-patcher uses an allowlist (keep only `testlib_*`, hide everything else), so
+this works regardless of whether the consumer is built with the same or a
+different Rust toolchain: every non-API symbol is localized/renamed, so there is
 nothing left to collide.
 
 ## Running Tests

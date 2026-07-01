@@ -40,7 +40,7 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
 /// Non-COFF members (LLVM bitcode, import descriptors) return `false`.
 /// `llvm-objcopy` rejects them, and passing them to `lib.exe` can crash the
 /// librarian (`LNK1000`). They duplicate the native COFF members, so they are
-/// dropped, matching the in-place COFF patcher.
+/// dropped from the output.
 fn is_patchable_coff(data: &[u8]) -> bool {
     matches!(File::parse(data), Ok(file) if file.format() == object::BinaryFormat::Coff)
 }
@@ -383,16 +383,15 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
 
 #[cfg(test)]
 mod tests {
-    //! Tests for the Windows/COFF allowlist (renaming) path.
+    //! Tests for the Windows/COFF renaming path.
     //!
     //! The COFF backend keeps only the public API global by *renaming* every other
-    //! defined symbol under `keep_prefix` (via `llvm-objcopy --redefine-syms`),
-    //! rather than flipping storage classes per object. The rename map is keyed by
-    //! name and applied to every object, so a symbol defined in one object and
-    //! referenced from a sibling (e.g. `ring`'s `ring_core_*` asm routines) is
-    //! rewritten identically on both sides and stays linkable. These tests pin that
-    //! down on synthetic COFF objects built with `object::write`, the same def/ref
-    //! shape that reproduced the original `ring` static-link failure.
+    //! defined symbol under `keep_prefix` (via `llvm-objcopy --redefine-syms`). The
+    //! rename map is keyed by name and applied to every object, so a symbol defined
+    //! in one object and referenced from a sibling (e.g. `ring`'s `ring_core_*` asm
+    //! routines) is rewritten identically on both sides and stays linkable. These
+    //! tests pin that down on synthetic COFF objects built with `object::write`, the
+    //! same def/ref shape that reproduced the original `ring` static-link failure.
 
     use super::*;
     use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};

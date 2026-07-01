@@ -52,8 +52,7 @@ lib-patcher \
 - `--list, -l`: List all public symbols instead of patching
 
 `--keep-prefix` is required when patching. Invoking the patcher without it is
-an error. (The older blocklist flags `--symbols` / `--filter-prefix` /
-`--default` have been removed.)
+an error.
 
 #### Cross-compiling
 
