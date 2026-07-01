@@ -318,9 +318,10 @@ fn verify_patched_lib(
     // 5. The public API must survive patching. Checking the output names alone is
     // not enough: on Windows every non-API global is renamed under keep_prefix, so
     // the output is full of keep_prefix names even if the real exports were renamed
-    // away (e.g. a mistyped --keep-prefix). Compare against the input instead and
-    // require that at least one symbol matching keep_prefix in the original library
-    // survived, verbatim, into the output.
+    // away (e.g. a mistyped --keep-prefix). Compare against the input instead: the
+    // patchers keep every keep_prefix symbol verbatim, so *every* symbol matching
+    // keep_prefix in the original library must still be present in the output. A
+    // missing one means a dropped export (truncated or partial repackage).
     let original_symbols = list_symbols(original_lib)?;
     let original_api: Vec<&str> = original_symbols
         .iter()
@@ -337,12 +338,24 @@ fn verify_patched_lib(
     }
 
     let output: HashSet<&str> = symbols.iter().map(String::as_str).collect();
-    if !original_api.iter().any(|s| output.contains(s)) {
+    let missing: Vec<&str> = original_api
+        .iter()
+        .copied()
+        .filter(|s| !output.contains(s))
+        .collect();
+    if !missing.is_empty() {
         return Err(format!(
-            "none of the {} input symbol(s) matching keep-prefix '{}' survived patching; \
-             the public API was renamed away or dropped",
+            "{} of {} input symbol(s) matching keep-prefix '{}' did not survive patching, \
+             e.g.: {}",
+            missing.len(),
             original_api.len(),
-            keep_prefix
+            keep_prefix,
+            missing
+                .iter()
+                .take(10)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
         )
         .into());
     }
@@ -640,6 +653,29 @@ mod tests {
         assert!(
             result.is_err(),
             "a prefix matching nothing in the input must fail verification"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_when_only_some_original_api_symbols_survive() {
+        // The input exports two API symbols; the output kept only one, as a
+        // truncated or partial repackage would. Accepting one survivor would let
+        // the dropped export fail later in the consumer, so require all of them.
+        let original = write_temp(
+            "verify-partial-orig",
+            &build_archive(&[
+                ("a.o", elf_object_with_global("myapp_one")),
+                ("b.o", elf_object_with_global("myapp_two")),
+            ]),
+        );
+        let patched = write_temp(
+            "verify-partial",
+            &build_archive(&[("a.o", elf_object_with_global("myapp_one"))]),
+        );
+        let result = verify_patched_lib(&patched.0, &original.0, "myapp_", "linux");
+        assert!(
+            result.is_err(),
+            "dropping any original API symbol must fail verification"
         );
     }
 
