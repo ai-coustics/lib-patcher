@@ -146,7 +146,7 @@ fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
         || name.starts_with("??")
 }
 
-// Include platform-specific implementations from allowlist module
+// Platform-specific implementations
 mod linux;
 mod macos;
 mod windows;

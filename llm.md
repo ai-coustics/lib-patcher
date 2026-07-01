@@ -19,6 +19,8 @@ The c-consumer is trying to use the patched library from a C project.
 
 All of those projects should work.
 
-Currently Linux and macOS work fine, but Windows has some issues. On Windows the tools work differnt so I don't know how to patch it.
+All three platforms are supported. Linux and macOS localize the non-API symbols;
+Windows renames them under the keep-prefix instead, because COFF makes localizing
+weak/COMDAT symbols unsafe.
 
 The msvc dev tools are in /c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64.

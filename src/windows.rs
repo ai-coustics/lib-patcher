@@ -132,7 +132,7 @@ pub(crate) fn patch_windows(
                 renamed_count += 1;
             }
             // Left public: either already prefixed (counts as kept API) or an
-            // MSVC-mangled name we skip silently, matching the prior behavior.
+            // MSVC-mangled name we skip silently.
             None => {
                 if symbol.starts_with(keep_prefix) {
                     kept_count += 1;

@@ -27,7 +27,7 @@ pub(crate) fn patch_linux(
         .unwrap_or_else(|_| panic!("Failed to run {}", ld_cmd));
     assert!(status.success(), "{} -r failed", ld_cmd);
 
-    // Step 2: Get all global symbols (both DEFAULT and HIDDEN visibility)
+    // Step 2: Get all GLOBAL and WEAK symbols (both DEFAULT and HIDDEN visibility)
     eprintln!("Extracting symbols to determine what to hide...");
     let readelf_output = Command::new("readelf")
         .args(["-sW"])
@@ -41,7 +41,7 @@ pub(crate) fn patch_linux(
 
     let symbols_output = String::from_utf8_lossy(&readelf_output.stdout);
 
-    // Parse readelf output to find GLOBAL symbols (both DEFAULT and HIDDEN)
+    // Parse readelf output to find GLOBAL and WEAK symbols (both DEFAULT and HIDDEN)
     let mut symbols_to_hide = Vec::new();
     for line in symbols_output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();

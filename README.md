@@ -113,7 +113,7 @@ fn main() {
 
 #### Linux
 1. Links all objects with `ld -r` into a single intermediate object
-2. Uses `readelf` to extract all GLOBAL symbols (both DEFAULT and HIDDEN visibility)
+2. Uses `readelf` to extract all GLOBAL and WEAK symbols (both DEFAULT and HIDDEN visibility)
 3. Filters to find symbols that don't match the prefix
 4. Uses `objcopy --localize-symbol` to make them local/private
 5. Creates final archive with `ar`

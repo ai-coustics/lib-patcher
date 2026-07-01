@@ -85,7 +85,7 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 ## Why This Test Design?
 
-The previous examples folder was too simplistic. This test suite addresses the real-world scenario:
+This test suite addresses the real-world scenario:
 - Third-party static libraries built with Rust
 - Need to integrate into projects that pull in the same stdlib and dependencies
 - Symbol conflicts from stdlib and common dependencies
