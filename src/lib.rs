@@ -151,14 +151,9 @@ mod linux;
 mod macos;
 mod windows;
 
-// Deprecated blocklist code path, preserved for backward compatibility.
-mod compat;
-
 use linux::patch_linux;
 use macos::patch_macos;
 use windows::patch_windows;
-
-pub use compat::{default_symbol_blocklist, filter_symbols_by_prefix, patch_lib_blocklist};
 
 /// Detects the architecture of a static library by examining the first object file
 /// Works for all platforms: macOS (Mach-O), Linux (ELF), Windows (COFF/PE)

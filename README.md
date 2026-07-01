@@ -45,38 +45,15 @@ lib-patcher \
 **CLI Options:**
 - `--input, -i`: Path to input static library (required)
 - `--output, -o`: Path to output patched library (required when patching)
-- `--keep-prefix, -k`: Prefix for symbols to keep public (allowlist mode)
+- `--keep-prefix, -k`: Prefix for symbols to keep public (required when patching)
 - `--triplet, -T`: Full Rust target triplet (e.g. `x86_64-pc-windows-gnullvm`, `aarch64-apple-ios`). Needed when cross-compiling: it selects the platform code path and the correct Apple platform version. Without it the host OS is assumed.
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
 - `--temp-dir, -t`: Directory for temporary files (optional)
 - `--list, -l`: List all public symbols instead of patching
 
-#### Deprecated blocklist flags (backward compatibility)
-
-Before the allowlist model, lib-patcher worked as a *blocklist*: it hid a
-specific set of symbols and left everything else public. Those flags still
-work so existing callers can migrate at their own pace, but they are
-**deprecated** — prefer `--keep-prefix`, which keeps only your public API and
-reliably hides everything else (including symbols the blocklist misses, such
-as v0-mangled allocator shims). Using any of them prints a deprecation
-warning.
-
-- `--symbols, -s`: Comma-separated list of symbols to hide
-- `--filter-prefix, -f`: Comma-separated list of prefixes; hides all symbols starting with these prefixes
-- `--default, -d`: Also hide the default stdlib blocklist (`rust_eh_personality`, `__rust_alloc`, ...)
-
-When none of `--keep-prefix`, `--symbols` or `--filter-prefix` is given, the
-default stdlib blocklist is applied (the old default behavior). `--keep-prefix`
-is mutually exclusive with these blocklist flags.
-
-```bash
-# Deprecated blocklist invocation (equivalent old-style call)
-lib-patcher \
-  --input vendor/libthirdparty.a \
-  --output vendor/libthirdparty_patched.a \
-  --default \
-  --filter-prefix ring_core
-```
+`--keep-prefix` is required when patching. Invoking the patcher without it is
+an error. (The older blocklist flags `--symbols` / `--filter-prefix` /
+`--default` have been removed.)
 
 #### Cross-compiling
 
