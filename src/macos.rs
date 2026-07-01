@@ -236,7 +236,9 @@ fn apple_platform_version(
     };
 
     if triplet.contains("apple-tvos") {
-        return if triplet.contains("-sim") {
+        // x86_64-apple-tvos is the Intel tvOS Simulator: tvOS never ran on Intel
+        // devices, so there is no -sim suffix to key on.
+        return if triplet.ends_with("-sim") || arch == "x86_64" {
             ("tvos-simulator", "15.0", "17.0")
         } else {
             ("tvos", "15.0", "17.0")
@@ -252,10 +254,13 @@ fn apple_platform_version(
     }
 
     if triplet.contains("apple-ios") {
-        if triplet.ends_with("-sim") {
-            return ("ios-simulator", "15.0", "17.0");
-        } else if triplet.ends_with("-macabi") {
+        // Order matters: check Catalyst (-macabi) first, then simulator.
+        // x86_64-apple-ios is the Intel iOS Simulator and carries no -sim suffix
+        // (iOS never ran on Intel devices), so treat x86_64 as simulator too.
+        if triplet.ends_with("-macabi") {
             return ("mac-catalyst", "15.0", "17.0");
+        } else if triplet.ends_with("-sim") || arch == "x86_64" {
+            return ("ios-simulator", "15.0", "17.0");
         } else {
             return ("ios", "15.0", "17.0");
         }
@@ -296,6 +301,26 @@ mod tests {
             apple_platform_version(Some("aarch64-apple-ios-sim"), "arm64").0,
             "ios-simulator"
         );
+        assert_eq!(
+            apple_platform_version(Some("x86_64-apple-ios-macabi"), "x86_64").0,
+            "mac-catalyst"
+        );
+    }
+
+    #[test]
+    fn intel_ios_and_tvos_triples_are_simulators_without_a_sim_suffix() {
+        // x86_64-apple-ios / -tvos are the Intel simulator targets: those OSes
+        // never ran on Intel devices, so there is no -sim suffix to key on and
+        // arch alone identifies the simulator.
+        assert_eq!(
+            apple_platform_version(Some("x86_64-apple-ios"), "x86_64").0,
+            "ios-simulator"
+        );
+        assert_eq!(
+            apple_platform_version(Some("x86_64-apple-tvos"), "x86_64").0,
+            "tvos-simulator"
+        );
+        // The Intel Catalyst triple still maps to mac-catalyst, not the simulator.
         assert_eq!(
             apple_platform_version(Some("x86_64-apple-ios-macabi"), "x86_64").0,
             "mac-catalyst"
