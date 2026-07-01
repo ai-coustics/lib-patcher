@@ -658,10 +658,10 @@ mod tests {
     /// object, and the public API symbol is collected.
     ///
     /// The synthetic `object::write` COFF used by the other tests can keep parsing
-    /// fine even when the object crate mishandles real rustc/MSVC archives (for
-    /// example after a change to its enabled features), so this exercises a real
-    /// archive to catch that class of breakage at the parsing stage rather than
-    /// as an unresolved-symbol link failure in the C consumer.
+    /// fine even when the object crate mishandles real rustc/MSVC archives, so
+    /// this exercises a real archive to catch that class of breakage at the
+    /// parsing stage rather than as an unresolved-symbol link failure in the C
+    /// consumer.
     #[test]
     fn parses_real_windows_archive_when_provided() {
         let Ok(path) = env::var("LIB_PATCHER_REAL_COFF_ARCHIVE") else {
