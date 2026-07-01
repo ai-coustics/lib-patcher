@@ -172,6 +172,14 @@ fn find_leaked_symbols<'a>(symbols: &'a [String], keep_prefix: &str) -> Vec<&'a 
         .collect()
 }
 
+/// Returns true if any symbol carries `keep_prefix` (bare, or in the macOS
+/// underscore-prefixed spelling), i.e. the public API survived patching.
+fn keeps_any_api_symbol(symbols: &[String], keep_prefix: &str) -> bool {
+    symbols.iter().any(|s| {
+        s.starts_with(keep_prefix) || s.strip_prefix('_').unwrap_or(s).starts_with(keep_prefix)
+    })
+}
+
 // Platform-specific implementations
 mod linux;
 mod macos;
@@ -290,6 +298,18 @@ fn verify_patched_lib(
                 .copied()
                 .collect::<Vec<_>>()
                 .join(", ")
+        )
+        .into());
+    }
+
+    // 5. The public API must survive patching. The leak check only guarantees
+    // nothing *extra* stayed global; it would not notice if the keep_prefix
+    // symbols themselves were dropped or mangled (e.g. their defining objects
+    // were skipped), leaving a library that verifies clean but is missing its API.
+    if !keeps_any_api_symbol(&symbols, keep_prefix) {
+        return Err(format!(
+            "no symbols matching keep-prefix '{}' remain; patching dropped the public API",
+            keep_prefix
         )
         .into());
     }
@@ -566,6 +586,22 @@ mod tests {
             result.is_ok(),
             "only-prefixed globals must pass: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn verify_rejects_a_library_that_lost_its_api() {
+        // Non-empty and leak-free (the only global is an allowed compiler symbol),
+        // but no keep-prefix symbol survived: patching dropped the public API.
+        // The leak check alone passes this; the API-presence check must not.
+        let archive =
+            build_archive(&[("a.o", elf_object_with_global("DW.ref.rust_eh_personality"))]);
+        let patched = write_temp("verify-noapi", &archive);
+        let original = write_temp("verify-noapi-orig", &archive);
+        let result = verify_patched_lib(&patched.0, &original.0, "myapp_", "linux");
+        assert!(
+            result.is_err(),
+            "a library with no keep-prefix symbols must fail verification"
         );
     }
 }
