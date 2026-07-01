@@ -46,17 +46,9 @@ jobs:
       - name: Run unit tests
         run: cargo test
 
-      - name: Build testlib static library (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build testlib static library
         working-directory: tests/testlib
         run: cargo build --release
-        shell: bash
-
-      - name: Build testlib static library (Windows)
-        if: runner.os == 'Windows'
-        working-directory: tests/testlib
-        run: cargo build --release
-        shell: pwsh
 
       - name: Patch testlib (Linux/macOS)
         if: runner.os != 'Windows'
@@ -93,18 +85,8 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      - name: Build and run Rust test (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build and run Rust test
         working-directory: tests/rust-consumer
         run: |
           cargo build --release
           cargo run --release
-        shell: bash
-
-      - name: Build and run Rust test (Windows)
-        if: runner.os == 'Windows'
-        working-directory: tests/rust-consumer
-        run: |
-          cargo build --release
-          cargo run --release
-        shell: pwsh
