@@ -34,20 +34,22 @@ nothing left to collide.
 
 ### Local Testing
 
-Run the full flow from the repository root. The builds use `--release`
-because a release static library is what users actually ship and patch.
+Run the full flow from the repository root. The test library is built with
+`--release` because a release static library is what users actually ship and
+patch; the CLI is built in debug so its overflow and `debug_assert` checks
+stay active while it patches.
 
 #### Linux / macOS
 
 ```bash
-# 1. Build the lib-patcher CLI
-cargo build --release
+# 1. Build the lib-patcher CLI (debug: keeps runtime checks on)
+cargo build
 
 # 2. Build the test library
 ( cd tests/testlib && cargo build --release )
 
 # 3. Patch it: keep only the testlib_ public API, hide everything else
-./target/release/lib-patcher \
+./target/debug/lib-patcher \
   --input tests/testlib/target/release/libtestlib.a \
   --output tests/testlib/target/release/libtestlib_patched.a \
   --keep-prefix testlib_
@@ -66,14 +68,14 @@ are on `PATH`. The static library uses the `.lib` extension here, and
 `/machine:` must match the target architecture (`x64`, `ARM64`, ...).
 
 ```powershell
-# 1. Build the lib-patcher CLI
-cargo build --release
+# 1. Build the lib-patcher CLI (debug: keeps runtime checks on)
+cargo build
 
 # 2. Build the test library
 cd tests\testlib; cargo build --release; cd ..\..
 
 # 3. Patch it: keep only the testlib_ public API, hide everything else
-.\target\release\lib-patcher.exe `
+.\target\debug\lib-patcher.exe `
   --input tests\testlib\target\release\testlib.lib `
   --output tests\testlib\target\release\testlib_patched.lib `
   --keep-prefix testlib_
