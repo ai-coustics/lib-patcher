@@ -267,3 +267,71 @@ fn apple_platform_version(
         ("macos", "10.13", "14.0")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_default_baseline_depends_on_arch() {
+        // With no triplet, Apple silicon baselines at macOS 11; x86_64 goes back
+        // to 10.13.
+        assert_eq!(
+            apple_platform_version(None, "arm64"),
+            ("macos", "11.0", "14.0")
+        );
+        assert_eq!(
+            apple_platform_version(None, "x86_64"),
+            ("macos", "10.13", "14.0")
+        );
+    }
+
+    #[test]
+    fn ios_device_simulator_and_catalyst_are_distinguished() {
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-ios"), "arm64").0,
+            "ios"
+        );
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-ios-sim"), "arm64").0,
+            "ios-simulator"
+        );
+        assert_eq!(
+            apple_platform_version(Some("x86_64-apple-ios-macabi"), "x86_64").0,
+            "mac-catalyst"
+        );
+    }
+
+    #[test]
+    fn tvos_and_visionos_map_to_ld_platform_names() {
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-tvos"), "arm64").0,
+            "tvos"
+        );
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-tvos-sim"), "arm64").0,
+            "tvos-simulator"
+        );
+        // visionOS uses ld's "xros" platform name.
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-visionos"), "arm64").0,
+            "xros"
+        );
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-visionos-sim"), "arm64").0,
+            "xros-simulator"
+        );
+    }
+
+    #[test]
+    fn darwin_triplet_falls_through_to_macos_baseline() {
+        assert_eq!(
+            apple_platform_version(Some("aarch64-apple-darwin"), "arm64"),
+            ("macos", "11.0", "14.0")
+        );
+        assert_eq!(
+            apple_platform_version(Some("x86_64-apple-darwin"), "x86_64"),
+            ("macos", "10.13", "14.0")
+        );
+    }
+}

@@ -138,12 +138,38 @@ fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
     name.starts_with(keep_prefix)
         || unprefixed.starts_with(keep_prefix)
         || unprefixed.starts_with("DW.ref.")
-        || unprefixed.starts_with("_GLOBAL_OFFSET_TABLE_")
+        || unprefixed.starts_with("GLOBAL_OFFSET_TABLE_")
         || unprefixed.starts_with("GCC_except_table")
         // COFF section/compiler symbols and MSVC-mangled names.
         || name.starts_with('@')
         || name.starts_with('.')
         || name.starts_with("??")
+}
+
+/// Returns the global symbols that violate the allowlist invariant: anything not
+/// matching `keep_prefix` and not one of the known compiler-internal exemptions.
+///
+/// Such a symbol (Rust stdlib, a dependency) leaking out as global would defeat
+/// the purpose and risk the very conflicts patching is meant to prevent.
+///
+/// Windows import-library members (e.g. `ProcessPrng` from `bcryptprimitives`)
+/// are exempt: their names must match the system DLL exports, so they cannot be
+/// renamed, and duplicate imports do not conflict the way defined symbols do.
+/// They are recognised by their paired `__imp_<name>` thunk.
+fn find_leaked_symbols<'a>(symbols: &'a [String], keep_prefix: &str) -> Vec<&'a str> {
+    let import_thunks: HashSet<&str> = symbols
+        .iter()
+        .filter_map(|s| s.strip_prefix("__imp_"))
+        .collect();
+    symbols
+        .iter()
+        .filter(|s| {
+            !symbol_is_allowed_global(s, keep_prefix)
+                && !s.starts_with("__imp_")
+                && !import_thunks.contains(s.as_str())
+        })
+        .map(String::as_str)
+        .collect()
 }
 
 // Platform-specific implementations
@@ -250,28 +276,9 @@ fn verify_patched_lib(
         return Err("Output library contains no symbols - patching may have failed".into());
     }
 
-    // 4. Enforce the allowlist invariant: every remaining global symbol must
-    // either carry the keep_prefix or be one of the known compiler-internal
-    // symbols. Anything else (Rust stdlib, dependencies) leaking out as global
-    // would defeat the purpose and risk the conflicts we are trying to prevent.
-    //
-    // Windows import-library members (e.g. ProcessPrng from bcryptprimitives)
-    // are exempt: their names must match the system DLL exports, so they cannot
-    // be renamed, and duplicate imports do not conflict the way defined symbols
-    // do. They are recognised by their paired `__imp_<name>` thunk.
-    let import_thunks: HashSet<&str> = symbols
-        .iter()
-        .filter_map(|s| s.strip_prefix("__imp_"))
-        .collect();
-    let leaked: Vec<&String> = symbols
-        .iter()
-        .filter(|s| {
-            !symbol_is_allowed_global(s, keep_prefix)
-                && !s.starts_with("__imp_")
-                && !import_thunks.contains(s.as_str())
-        })
-        .collect();
-
+    // 4. Enforce the allowlist invariant: no global symbol may leak past the
+    // keep_prefix and the known compiler-internal exemptions.
+    let leaked = find_leaked_symbols(&symbols, keep_prefix);
     if !leaked.is_empty() {
         return Err(format!(
             "{} global symbol(s) do not match keep-prefix '{}' and were not hidden, e.g.: {}",
@@ -280,7 +287,7 @@ fn verify_patched_lib(
             leaked
                 .iter()
                 .take(10)
-                .map(|s| s.as_str())
+                .copied()
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -352,4 +359,105 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
     let mut result: Vec<String> = symbols.into_iter().collect();
     result.sort();
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEEP: &str = "mylib_";
+
+    #[test]
+    fn allowlist_keeps_prefix_and_compiler_internals() {
+        // Public API, in both the bare and macOS underscore-prefixed spellings.
+        assert!(symbol_is_allowed_global("mylib_add", KEEP));
+        assert!(symbol_is_allowed_global("_mylib_add", KEEP));
+        // Compiler/linker internals the per-platform patchers legitimately keep.
+        assert!(symbol_is_allowed_global("DW.ref.rust_eh_personality", KEEP));
+        assert!(symbol_is_allowed_global("_GLOBAL_OFFSET_TABLE_", KEEP));
+        assert!(symbol_is_allowed_global("GCC_except_table3", KEEP));
+        // COFF section/compiler symbols and MSVC-mangled names.
+        assert!(symbol_is_allowed_global("@feat.00", KEEP));
+        assert!(symbol_is_allowed_global(".weak.foo", KEEP));
+        assert!(symbol_is_allowed_global("??_C@_05foo@bar@", KEEP));
+    }
+
+    #[test]
+    fn allowlist_rejects_stdlib_and_dependency_symbols() {
+        // The whole point: nothing outside the API or the internals list passes.
+        assert!(!symbol_is_allowed_global(
+            "_ZN10serde_json2de10from_traitE",
+            KEEP
+        ));
+        assert!(!symbol_is_allowed_global("rust_eh_personality", KEEP));
+        assert!(!symbol_is_allowed_global("other_prefix_fn", KEEP));
+    }
+
+    #[test]
+    fn triplet_dispatch_selects_the_right_os() {
+        assert_eq!(
+            target_os_from_triplet("x86_64-pc-windows-gnullvm"),
+            Some("windows")
+        );
+        assert_eq!(
+            target_os_from_triplet("x86_64-pc-windows-msvc"),
+            Some("windows")
+        );
+        assert_eq!(target_os_from_triplet("aarch64-apple-ios"), Some("ios"));
+        assert_eq!(target_os_from_triplet("aarch64-apple-ios-sim"), Some("ios"));
+        assert_eq!(target_os_from_triplet("aarch64-apple-tvos"), Some("tvos"));
+        assert_eq!(
+            target_os_from_triplet("aarch64-apple-visionos"),
+            Some("visionos")
+        );
+        assert_eq!(
+            target_os_from_triplet("aarch64-apple-darwin"),
+            Some("macos")
+        );
+        assert_eq!(
+            target_os_from_triplet("x86_64-unknown-linux-gnu"),
+            Some("linux")
+        );
+        assert_eq!(
+            target_os_from_triplet("aarch64-linux-android"),
+            Some("linux")
+        );
+        // Apple-platform ordering matters: an iOS Catalyst target must resolve to
+        // iOS, not fall through to the generic apple -> macos branch.
+        assert_eq!(
+            target_os_from_triplet("x86_64-apple-ios-macabi"),
+            Some("ios")
+        );
+        // Unknown targets return None so the caller falls back to env/host.
+        assert_eq!(target_os_from_triplet("wasm32-unknown-unknown"), None);
+    }
+
+    #[test]
+    fn leak_detection_flags_stdlib_but_not_exemptions() {
+        let symbols = vec![
+            "mylib_add".to_string(),
+            "DW.ref.rust_eh_personality".to_string(),
+            "_ZN4core3fmt3fooE".to_string(), // a leaked stdlib symbol
+        ];
+        assert_eq!(
+            find_leaked_symbols(&symbols, KEEP),
+            vec!["_ZN4core3fmt3fooE"]
+        );
+    }
+
+    #[test]
+    fn leak_detection_exempts_paired_windows_import_thunks() {
+        // A Windows import pair: the __imp_ thunk and its bare name both name a
+        // system DLL export that cannot be renamed, so neither counts as a leak.
+        let paired = vec![
+            "mylib_run".to_string(),
+            "__imp_ProcessPrng".to_string(),
+            "ProcessPrng".to_string(),
+        ];
+        assert!(find_leaked_symbols(&paired, KEEP).is_empty());
+
+        // A bare name with no paired __imp_ thunk is still a leak.
+        let unpaired = vec!["ProcessPrng".to_string()];
+        assert_eq!(find_leaked_symbols(&unpaired, KEEP), vec!["ProcessPrng"]);
+    }
 }
