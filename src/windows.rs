@@ -271,6 +271,23 @@ pub(crate) fn patch_windows(
     eprintln!("✓ Windows patching complete (via renaming)");
 }
 
+/// Searches a `rustlib` directory for the bundled rust-objcopy, trying the
+/// host's executable name: `rust-objcopy` on Unix, `rust-objcopy.exe` on Windows.
+/// The tool runs on the patching host, so the suffix follows the host, not the
+/// Windows target being patched.
+fn find_rust_objcopy_in_rustlib(rustlib: &Path) -> Option<PathBuf> {
+    for entry in fs::read_dir(rustlib).ok()?.flatten() {
+        let bin = entry.path().join("bin");
+        for name in ["rust-objcopy", "rust-objcopy.exe"] {
+            let candidate = bin.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn find_objcopy_tool() -> PathBuf {
     if let Ok(path) = which::which("llvm-objcopy") {
         return path;
@@ -295,15 +312,9 @@ fn find_objcopy_tool() -> PathBuf {
 
     if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
         let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let sysroot_path = PathBuf::from(sysroot);
-        let rustlib = sysroot_path.join("lib").join("rustlib");
-        if let Ok(entries) = fs::read_dir(&rustlib) {
-            for entry in entries.flatten() {
-                let bin_objcopy = entry.path().join("bin").join("rust-objcopy.exe");
-                if bin_objcopy.exists() {
-                    return bin_objcopy;
-                }
-            }
+        let rustlib = PathBuf::from(sysroot).join("lib").join("rustlib");
+        if let Some(path) = find_rust_objcopy_in_rustlib(&rustlib) {
+            return path;
         }
     }
 
@@ -695,6 +706,24 @@ mod tests {
             rename_target("_internal", "testlib_"),
             Some("testlib__internal".to_string())
         );
+    }
+
+    #[test]
+    fn finds_bundled_rust_objcopy_without_exe_suffix() {
+        // The Rust llvm-tools component installs the tool as `rust-objcopy` (no
+        // .exe) on Unix hosts. The sysroot search must find that spelling, not
+        // only the Windows `.exe` one, or cross-patching a Windows archive from
+        // Linux/macOS fails even though the documented tool is present.
+        let base = env::temp_dir().join(format!("lib-patcher-rustlib-{}", std::process::id()));
+        let bin = base.join("x86_64-unknown-linux-gnu").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let tool = bin.join("rust-objcopy");
+        fs::write(&tool, b"").unwrap();
+
+        let found = find_rust_objcopy_in_rustlib(&base);
+        fs::remove_dir_all(&base).ok();
+
+        assert_eq!(found.as_deref(), Some(tool.as_path()));
     }
 
     /// Guards `patch_windows`'s object-parsing path against real toolchain COFF.
