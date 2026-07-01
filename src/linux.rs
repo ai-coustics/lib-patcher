@@ -86,14 +86,19 @@ pub(crate) fn patch_linux(
     if !symbols_to_hide.is_empty() {
         eprintln!("Localizing symbols...");
 
-        // Build a single objcopy command with all symbols to localize
-        let mut cmd = Command::new(&objcopy_cmd);
-        for symbol in &symbols_to_hide {
-            cmd.arg("--localize-symbol").arg(symbol);
-        }
-        cmd.arg(&intermediate).arg(&final_obj);
+        // Pass the names in a file rather than one --localize-symbol arg each: a
+        // real Rust staticlib has thousands of long symbol names, which would
+        // overflow the argv limit (E2BIG) before objcopy even runs.
+        // --localize-symbols reads one name per line.
+        let symbols_file = out_dir.join(format!("{}_localize.txt", lib_name));
+        fs::write(&symbols_file, symbols_to_hide.join("\n"))
+            .expect("Failed to write localize-symbols file");
 
-        let status = cmd
+        let status = Command::new(&objcopy_cmd)
+            .arg("--localize-symbols")
+            .arg(&symbols_file)
+            .arg(&intermediate)
+            .arg(&final_obj)
             .status()
             .unwrap_or_else(|_| panic!("Failed to run {}", objcopy_cmd));
 
@@ -102,6 +107,7 @@ pub(crate) fn patch_linux(
         }
 
         eprintln!("  Localized {} symbols", symbols_to_hide.len());
+        fs::remove_file(&symbols_file).ok();
     }
 
     // Step 4: Create archive
