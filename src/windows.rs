@@ -291,6 +291,19 @@ fn find_objcopy_tool() -> PathBuf {
     panic!("Could not find 'llvm-objcopy' or 'rust-objcopy'.");
 }
 
+/// Maps a target architecture to its MSVC `/MACHINE` type (e.g. "x86_64" ->
+/// "X64"). Returns `None` for architectures with no known machine flag, in which
+/// case the librarian is invoked without an explicit `/MACHINE`.
+fn msvc_machine_type(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" | "arm64" => Some("ARM64"),
+        "x86_64" => Some("X64"),
+        "x86" | "i686" => Some("X86"),
+        "arm" => Some("ARM"),
+        _ => None,
+    }
+}
+
 /// Determines the appropriate library tool for Windows
 fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     // Determine target architecture
@@ -312,13 +325,7 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
     let host_arch = env::consts::ARCH;
 
     // Map architecture to MSVC machine type
-    let machine_type = match target_arch_str.as_str() {
-        "aarch64" | "arm64" => Some("ARM64".to_string()),
-        "x86_64" => Some("X64".to_string()),
-        "x86" | "i686" => Some("X86".to_string()),
-        "arm" => Some("ARM".to_string()),
-        _ => None,
-    };
+    let machine_type = msvc_machine_type(&target_arch_str).map(String::from);
 
     // Check if we're doing cross-architecture
     let _is_cross = target_arch_str != host_arch;
@@ -617,6 +624,17 @@ mod tests {
             rename_target("internal", PREFIX),
             Some("myapp_internal".to_string())
         );
+    }
+
+    #[test]
+    fn arch_maps_to_msvc_machine_type() {
+        assert_eq!(msvc_machine_type("aarch64"), Some("ARM64"));
+        assert_eq!(msvc_machine_type("arm64"), Some("ARM64"));
+        assert_eq!(msvc_machine_type("x86_64"), Some("X64"));
+        assert_eq!(msvc_machine_type("i686"), Some("X86"));
+        assert_eq!(msvc_machine_type("arm"), Some("ARM"));
+        // Unknown arch: the librarian runs without an explicit /MACHINE.
+        assert_eq!(msvc_machine_type("mips"), None);
     }
 
     #[test]

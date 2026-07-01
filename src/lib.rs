@@ -364,8 +364,56 @@ pub fn list_symbols(static_lib: &Path) -> Result<Vec<String>, Box<dyn std::error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object::write::{Object, StandardSection, Symbol, SymbolSection};
+    use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
     const KEEP: &str = "mylib_";
+
+    /// A minimal ELF object defining one global symbol in `.text`.
+    fn elf_object_with_global(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0xc3], 1); // ret
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: off,
+            size: 1,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage, // global (STB_GLOBAL)
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
+    /// Wraps `members` (name, bytes) into an `ar` archive in memory.
+    fn build_archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut builder = ar::Builder::new(&mut buf);
+            for (name, data) in members {
+                let header = ar::Header::new(name.as_bytes().to_vec(), data.len() as u64);
+                builder.append(&header, data.as_slice()).unwrap();
+            }
+        }
+        buf
+    }
+
+    /// Writes bytes to a uniquely named temp file and returns a guard that
+    /// removes it on drop, so tests do not leak files even when they panic.
+    struct TempFile(std::path::PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            fs::remove_file(&self.0).ok();
+        }
+    }
+    fn write_temp(tag: &str, bytes: &[u8]) -> TempFile {
+        let mut path = std::env::temp_dir();
+        path.push(format!("lib-patcher-test-{}-{}.a", std::process::id(), tag));
+        fs::write(&path, bytes).unwrap();
+        TempFile(path)
+    }
 
     #[test]
     fn allowlist_keeps_prefix_and_compiler_internals() {
@@ -459,5 +507,65 @@ mod tests {
         // A bare name with no paired __imp_ thunk is still a leak.
         let unpaired = vec!["ProcessPrng".to_string()];
         assert_eq!(find_leaked_symbols(&unpaired, KEEP), vec!["ProcessPrng"]);
+    }
+
+    #[test]
+    fn list_symbols_returns_sorted_deduped_globals() {
+        let archive = build_archive(&[
+            ("b.o", elf_object_with_global("zeta_sym")),
+            ("a.o", elf_object_with_global("alpha_sym")),
+        ]);
+        let f = write_temp("list", &archive);
+        let syms = list_symbols(&f.0).unwrap();
+        assert_eq!(syms, vec!["alpha_sym".to_string(), "zeta_sym".to_string()]);
+    }
+
+    #[test]
+    fn list_symbols_skips_non_object_members() {
+        // A member that isn't an object file must be skipped, not fatal.
+        let archive = build_archive(&[
+            ("junk.txt", b"not an object".to_vec()),
+            ("a.o", elf_object_with_global("real_sym")),
+        ]);
+        let f = write_temp("skip", &archive);
+        let syms = list_symbols(&f.0).unwrap();
+        assert_eq!(syms, vec!["real_sym".to_string()]);
+    }
+
+    #[test]
+    fn list_symbols_on_empty_archive_is_empty() {
+        let f = write_temp("empty", &build_archive(&[]));
+        assert!(list_symbols(&f.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn detect_archive_arch_reads_the_first_object() {
+        let archive = build_archive(&[("a.o", elf_object_with_global("s"))]);
+        let f = write_temp("arch", &archive);
+        assert_eq!(detect_archive_arch(&f.0), "x86_64");
+    }
+
+    #[test]
+    fn verify_rejects_a_library_with_a_leaked_global() {
+        // End-to-end through the real file path: an archive whose only global
+        // does not match the keep-prefix must fail verification (the safety net).
+        let archive = build_archive(&[("a.o", elf_object_with_global("definitely_leaked"))]);
+        let patched = write_temp("verify-bad", &archive);
+        let original = write_temp("verify-bad-orig", &archive);
+        let result = verify_patched_lib(&patched.0, &original.0, "myapp_", "linux");
+        assert!(result.is_err(), "a leaked global must fail verification");
+    }
+
+    #[test]
+    fn verify_accepts_a_library_with_only_prefixed_globals() {
+        let archive = build_archive(&[("a.o", elf_object_with_global("myapp_public"))]);
+        let patched = write_temp("verify-ok", &archive);
+        let original = write_temp("verify-ok-orig", &archive);
+        let result = verify_patched_lib(&patched.0, &original.0, "myapp_", "linux");
+        assert!(
+            result.is_ok(),
+            "only-prefixed globals must pass: {:?}",
+            result
+        );
     }
 }

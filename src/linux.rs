@@ -129,6 +129,23 @@ pub(crate) fn patch_linux(
     eprintln!("✓ Linux patching complete");
 }
 
+/// Maps a target architecture to its GNU cross-toolchain triplet prefix
+/// (e.g. "aarch64" -> "aarch64-linux-gnu"). Returns `None` for architectures
+/// with no known prefix, so the caller falls back to the native tools.
+fn linux_triplet_prefix(target_arch: &str) -> Option<&'static str> {
+    match target_arch {
+        "aarch64" | "arm64" => Some("aarch64-linux-gnu"),
+        "arm" | "armv7" => Some("arm-linux-gnueabihf"),
+        "x86_64" => Some("x86_64-linux-gnu"),
+        "x86" | "i686" => Some("i686-linux-gnu"),
+        "riscv64" => Some("riscv64-linux-gnu"),
+        "powerpc64" => Some("powerpc64-linux-gnu"),
+        "powerpc64le" => Some("powerpc64le-linux-gnu"),
+        "s390x" => Some("s390x-linux-gnu"),
+        _ => None,
+    }
+}
+
 /// Determines the appropriate toolchain for the target architecture on Linux
 fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
     let host_arch = std::env::consts::ARCH;
@@ -139,16 +156,9 @@ fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
     }
 
     // For cross-compilation, determine the GNU triplet prefix
-    let triplet_prefix = match target_arch {
-        "aarch64" | "arm64" => "aarch64-linux-gnu",
-        "arm" | "armv7" => "arm-linux-gnueabihf",
-        "x86_64" => "x86_64-linux-gnu",
-        "x86" | "i686" => "i686-linux-gnu",
-        "riscv64" => "riscv64-linux-gnu",
-        "powerpc64" => "powerpc64-linux-gnu",
-        "powerpc64le" => "powerpc64le-linux-gnu",
-        "s390x" => "s390x-linux-gnu",
-        _ => {
+    let triplet_prefix = match linux_triplet_prefix(target_arch) {
+        Some(prefix) => prefix,
+        None => {
             eprintln!(
                 "Warning: Unknown target architecture '{}', falling back to native tools",
                 target_arch
@@ -175,5 +185,26 @@ fn get_linux_toolchain(target_arch: &str) -> (String, String, String) {
             triplet_prefix
         );
         ("ld".to_string(), "objcopy".to_string(), "ar".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_arches_map_to_gnu_triplet_prefixes() {
+        assert_eq!(linux_triplet_prefix("aarch64"), Some("aarch64-linux-gnu"));
+        assert_eq!(linux_triplet_prefix("arm64"), Some("aarch64-linux-gnu"));
+        assert_eq!(linux_triplet_prefix("arm"), Some("arm-linux-gnueabihf"));
+        assert_eq!(linux_triplet_prefix("x86_64"), Some("x86_64-linux-gnu"));
+        assert_eq!(linux_triplet_prefix("i686"), Some("i686-linux-gnu"));
+        assert_eq!(linux_triplet_prefix("riscv64"), Some("riscv64-linux-gnu"));
+        assert_eq!(linux_triplet_prefix("s390x"), Some("s390x-linux-gnu"));
+    }
+
+    #[test]
+    fn unknown_arch_has_no_prefix_so_caller_uses_native_tools() {
+        assert_eq!(linux_triplet_prefix("m68k"), None);
     }
 }
