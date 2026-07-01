@@ -172,12 +172,14 @@ fn find_leaked_symbols<'a>(symbols: &'a [String], keep_prefix: &str) -> Vec<&'a 
         .collect()
 }
 
-/// Returns true if any symbol carries `keep_prefix` (bare, or in the macOS
-/// underscore-prefixed spelling), i.e. the public API survived patching.
-fn keeps_any_api_symbol(symbols: &[String], keep_prefix: &str) -> bool {
-    symbols.iter().any(|s| {
-        s.starts_with(keep_prefix) || s.strip_prefix('_').unwrap_or(s).starts_with(keep_prefix)
-    })
+/// Returns true if `name` carries `keep_prefix`, bare or in the macOS
+/// underscore-prefixed spelling (`_mylib_foo` for `mylib_`).
+fn matches_keep_prefix(name: &str, keep_prefix: &str) -> bool {
+    name.starts_with(keep_prefix)
+        || name
+            .strip_prefix('_')
+            .unwrap_or(name)
+            .starts_with(keep_prefix)
 }
 
 // Platform-specific implementations
@@ -302,13 +304,33 @@ fn verify_patched_lib(
         .into());
     }
 
-    // 5. The public API must survive patching. The leak check only guarantees
-    // nothing *extra* stayed global; it would not notice if the keep_prefix
-    // symbols themselves were dropped or mangled (e.g. their defining objects
-    // were skipped), leaving a library that verifies clean but is missing its API.
-    if !keeps_any_api_symbol(&symbols, keep_prefix) {
+    // 5. The public API must survive patching. Checking the output names alone is
+    // not enough: on Windows every non-API global is renamed under keep_prefix, so
+    // the output is full of keep_prefix names even if the real exports were renamed
+    // away (e.g. a mistyped --keep-prefix). Compare against the input instead and
+    // require that at least one symbol matching keep_prefix in the original library
+    // survived, verbatim, into the output.
+    let original_symbols = list_symbols(original_lib)?;
+    let original_api: Vec<&str> = original_symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|s| matches_keep_prefix(s, keep_prefix))
+        .collect();
+
+    if original_api.is_empty() {
         return Err(format!(
-            "no symbols matching keep-prefix '{}' remain; patching dropped the public API",
+            "keep-prefix '{}' matched no symbols in the input library; check the prefix",
+            keep_prefix
+        )
+        .into());
+    }
+
+    let output: HashSet<&str> = symbols.iter().map(String::as_str).collect();
+    if !original_api.iter().any(|s| output.contains(s)) {
+        return Err(format!(
+            "none of the {} input symbol(s) matching keep-prefix '{}' survived patching; \
+             the public API was renamed away or dropped",
+            original_api.len(),
             keep_prefix
         )
         .into());
@@ -590,18 +612,44 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_a_library_that_lost_its_api() {
-        // Non-empty and leak-free (the only global is an allowed compiler symbol),
-        // but no keep-prefix symbol survived: patching dropped the public API.
-        // The leak check alone passes this; the API-presence check must not.
-        let archive =
-            build_archive(&[("a.o", elf_object_with_global("DW.ref.rust_eh_personality"))]);
-        let patched = write_temp("verify-noapi", &archive);
-        let original = write_temp("verify-noapi-orig", &archive);
+    fn verify_rejects_when_prefix_matched_nothing_in_input() {
+        // A mistyped prefix: the input exports `testlib_add`, but the user passed
+        // `teslib_`. On Windows that would rename the real export to
+        // `teslib_testlib_add`, so the output is full of `teslib_*` names; checking
+        // output names alone would pass. Comparing against the input catches it.
+        let original = write_temp(
+            "verify-typo-orig",
+            &build_archive(&[("a.o", elf_object_with_global("testlib_add"))]),
+        );
+        let patched = write_temp(
+            "verify-typo",
+            &build_archive(&[("a.o", elf_object_with_global("teslib_testlib_add"))]),
+        );
+        let result = verify_patched_lib(&patched.0, &original.0, "teslib_", "linux");
+        assert!(
+            result.is_err(),
+            "a prefix matching nothing in the input must fail verification"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_when_the_original_api_did_not_survive() {
+        // The input's public API (`myapp_keep`) is gone from the output, which only
+        // contains a different prefixed name (as a renamed internal would be). The
+        // leak check passes and output names match the prefix, but the real API was
+        // not preserved, so verification must fail.
+        let original = write_temp(
+            "verify-lost-orig",
+            &build_archive(&[("a.o", elf_object_with_global("myapp_keep"))]),
+        );
+        let patched = write_temp(
+            "verify-lost",
+            &build_archive(&[("a.o", elf_object_with_global("myapp_other"))]),
+        );
         let result = verify_patched_lib(&patched.0, &original.0, "myapp_", "linux");
         assert!(
             result.is_err(),
-            "a library with no keep-prefix symbols must fail verification"
+            "output must preserve an original keep-prefix symbol, not just any"
         );
     }
 }
