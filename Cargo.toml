@@ -11,16 +11,7 @@ keywords = ["static-library", "linking", "symbol-filtering", "build-tools", "ffi
 categories = ["development-tools::build-utils", "development-tools::ffi"]
 
 [dependencies]
-object = { version = "0.37", default-features = false, features = [
-    "read_core",
-    "write_core",
-    "std",
-    "archive",
-    "coff",
-    "pe",
-    "elf",
-    "macho",
-] }
+object = { version = "0.37", features = ["write_core", "read_core", "std"] }
 ar = "0.9"
 clap = { version = "4.5", features = ["derive"] }
 which = "8.0.0"
