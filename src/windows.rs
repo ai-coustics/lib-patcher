@@ -651,13 +651,17 @@ mod tests {
         );
     }
 
-    /// Regression guard for real toolchain COFF. When
-    /// `LIB_PATCHER_REAL_COFF_ARCHIVE` points at a real Windows static library
-    /// (CI sets it on the Windows runner), assert the object crate actually
-    /// parses its members the way `patch_windows` relies on: at least one
-    /// patchable COFF object, and the public API symbol is collected. Synthetic
-    /// `object::write` COFF did not reproduce the object-feature regression that
-    /// broke real archives; parsing a real one does.
+    /// Guards `patch_windows`'s object-parsing path against real toolchain COFF.
+    /// When `LIB_PATCHER_REAL_COFF_ARCHIVE` points at a real Windows static
+    /// library (CI sets it on the Windows runner), assert the object crate parses
+    /// its members the way `patch_windows` relies on: at least one patchable COFF
+    /// object, and the public API symbol is collected.
+    ///
+    /// The synthetic `object::write` COFF used by the other tests can keep parsing
+    /// fine even when the object crate mishandles real rustc/MSVC archives (for
+    /// example after a change to its enabled features), so this exercises a real
+    /// archive to catch that class of breakage at the parsing stage rather than
+    /// as an unresolved-symbol link failure in the C consumer.
     #[test]
     fn parses_real_windows_archive_when_provided() {
         let Ok(path) = env::var("LIB_PATCHER_REAL_COFF_ARCHIVE") else {
