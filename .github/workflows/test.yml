@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
@@ -49,6 +49,15 @@ jobs:
       - name: Build testlib static library
         working-directory: tests/testlib
         run: cargo build --release
+
+      # Point the object-parsing regression test at the real static library the
+      # toolchain just produced. Runs only on Windows: the guard is about COFF,
+      # and the earlier "Run unit tests" step skips it (env var unset).
+      - name: Verify object parses the real COFF archive (Windows)
+        if: runner.os == 'Windows'
+        env:
+          LIB_PATCHER_REAL_COFF_ARCHIVE: tests/testlib/target/release/testlib.lib
+        run: cargo test parses_real_windows_archive_when_provided
 
       - name: Patch testlib (Linux/macOS)
         if: runner.os != 'Windows'

@@ -650,4 +650,40 @@ mod tests {
             Some("testlib__internal".to_string())
         );
     }
+
+    /// Regression guard for real toolchain COFF. When
+    /// `LIB_PATCHER_REAL_COFF_ARCHIVE` points at a real Windows static library
+    /// (CI sets it on the Windows runner), assert the object crate actually
+    /// parses its members the way `patch_windows` relies on: at least one
+    /// patchable COFF object, and the public API symbol is collected. Synthetic
+    /// `object::write` COFF did not reproduce the object-feature regression that
+    /// broke real archives; parsing a real one does.
+    #[test]
+    fn parses_real_windows_archive_when_provided() {
+        let Ok(path) = env::var("LIB_PATCHER_REAL_COFF_ARCHIVE") else {
+            return; // fixture not provided (non-Windows CI / local): nothing to check
+        };
+        let bytes = fs::read(&path).expect("failed to read the fixture archive");
+        let archive = object::read::archive::ArchiveFile::parse(&*bytes)
+            .expect("a real static library must parse as an archive");
+
+        let mut any_coff = false;
+        let mut defined = HashSet::new();
+        for member in archive.members() {
+            let data = member
+                .expect("archive member")
+                .data(&*bytes)
+                .expect("member data");
+            if is_patchable_coff(data) {
+                any_coff = true;
+            }
+            collect_defined_globals(data, &mut defined);
+        }
+
+        assert!(any_coff, "real archive must contain patchable COFF members");
+        assert!(
+            defined.contains("testlib_add"),
+            "collect_defined_globals must find the public API in a real archive"
+        );
+    }
 }
