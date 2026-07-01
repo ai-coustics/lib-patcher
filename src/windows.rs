@@ -34,6 +34,26 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     }
 }
 
+/// Inserts the names of all globally-visible, *undefined* symbols into `out`.
+///
+/// These are external references the archive expects something else to define
+/// (a consumer callback, a system import). They are collected so a rename target
+/// never lands on one: renaming an internal onto a referenced name would satisfy
+/// that external reference with the internal definition instead of the intended
+/// provider.
+fn collect_undefined_globals(data: &[u8], out: &mut HashSet<String>) {
+    if let Ok(file) = File::parse(data) {
+        for symbol in file.symbols() {
+            if symbol.is_global()
+                && symbol.is_undefined()
+                && let Ok(name) = symbol.name()
+            {
+                out.insert(name.to_string());
+            }
+        }
+    }
+}
+
 /// Whether `data` is a regular COFF object the renamer can rewrite and the
 /// archiver can store.
 ///
@@ -77,17 +97,25 @@ fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
 /// moves under `keep_prefix`, paired with a target name unique within the archive.
 ///
 /// `rename_target` alone maps an internal `foo` onto `<keep_prefix>foo`, but that
-/// name may already be a public API symbol (e.g. internal `add` -> `myapp_add`
-/// when `myapp_add` is exported) or an earlier rename. Applying such a map would
-/// leave two definitions of the same name, which `list_symbols` cannot see (it
-/// dedups) but the consumer's linker hits as a duplicate symbol or a wrong bind.
-/// So a colliding target gets a numeric suffix until it is unique. Symbols are
-/// processed in sorted order to keep the map reproducible.
-fn build_renames(defined: &HashSet<String>, keep_prefix: &str) -> Vec<(String, String)> {
+/// name may already exist in the archive: as a public API symbol (e.g. internal
+/// `add` -> `myapp_add` when `myapp_add` is exported), as an undefined external
+/// reference (`myapp_add` a callback/import expects the consumer to provide), or
+/// as an earlier rename. Renaming onto a defined name leaves two definitions;
+/// renaming onto a referenced name captures that reference with the internal
+/// definition. Neither is visible to `list_symbols` (it lists defined names and
+/// dedups), but the consumer's linker hits a duplicate symbol or a wrong bind. So
+/// every existing name (defined and undefined) is reserved, and a colliding
+/// target gets a numeric suffix until unique. Symbols are processed in sorted
+/// order to keep the map reproducible.
+fn build_renames(
+    defined: &HashSet<String>,
+    undefined: &HashSet<String>,
+    keep_prefix: &str,
+) -> Vec<(String, String)> {
     let mut symbols: Vec<&String> = defined.iter().collect();
     symbols.sort();
 
-    let mut taken: HashSet<String> = defined.iter().cloned().collect();
+    let mut taken: HashSet<String> = defined.iter().chain(undefined.iter()).cloned().collect();
     let mut renames = Vec::new();
     for symbol in symbols {
         let Some(base) = rename_target(symbol, keep_prefix) else {
@@ -126,6 +154,7 @@ pub(crate) fn patch_windows(
 
     let mut obj_files = Vec::new();
     let mut defined_symbols = HashSet::new();
+    let mut undefined_symbols = HashSet::new();
 
     // Step 1: Extract objects and collect defined symbols
     eprintln!("Extracting objects and scanning symbols...");
@@ -145,15 +174,17 @@ pub(crate) fn patch_windows(
         fs::write(&obj_path, data).expect("Failed to write object file");
         obj_files.push((obj_path, is_patchable_coff(data)));
 
-        // Parse object file to find defined symbols
+        // Parse object file to find defined symbols, plus undefined references
+        // that rename targets must not collide with.
         collect_defined_globals(data, &mut defined_symbols);
+        collect_undefined_globals(data, &mut undefined_symbols);
     }
 
     eprintln!("Extracted {} objects.", obj_files.len());
     eprintln!("Found {} defined symbols.", defined_symbols.len());
 
     // Step 2: Generate renames (collision-aware; see build_renames).
-    let rename_pairs = build_renames(&defined_symbols, keep_prefix);
+    let rename_pairs = build_renames(&defined_symbols, &undefined_symbols, keep_prefix);
     let kept_count = defined_symbols
         .iter()
         .filter(|s| s.starts_with(keep_prefix))
@@ -547,10 +578,14 @@ mod tests {
         keep_prefix: &str,
     ) -> std::collections::HashMap<String, String> {
         let mut defined = HashSet::new();
+        let mut undefined = HashSet::new();
         for obj in objects {
             collect_defined_globals(obj, &mut defined);
+            collect_undefined_globals(obj, &mut undefined);
         }
-        build_renames(&defined, keep_prefix).into_iter().collect()
+        build_renames(&defined, &undefined, keep_prefix)
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -648,6 +683,29 @@ mod tests {
             renamed.starts_with(PREFIX),
             "the renamed internal still lives under keep_prefix"
         );
+    }
+
+    #[test]
+    fn internal_is_not_renamed_onto_an_undefined_external_reference() {
+        // A defined internal `add`, a defined API `myapp_run`, and an undefined
+        // external reference to `myapp_add` (a callback/import the consumer is
+        // expected to provide). Renaming `add` -> `myapp_add` would satisfy that
+        // external reference with the internal definition, so the referenced name
+        // must be reserved even though it is not defined in the archive.
+        let map = rename_map(
+            &[
+                make_def_object("myapp_run"),
+                make_ref_object("myapp_add"),
+                make_def_object("add"),
+            ],
+            PREFIX,
+        );
+        let renamed = map.get("add").expect("internal `add` must be renamed");
+        assert_ne!(
+            renamed, "myapp_add",
+            "must not capture the undefined external reference"
+        );
+        assert!(renamed.starts_with(PREFIX));
     }
 
     #[test]
