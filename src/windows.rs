@@ -73,6 +73,38 @@ fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
     Some(format!("{}{}", keep_prefix, symbol))
 }
 
+/// Builds the archive-wide rename map: every defined global that `rename_target`
+/// moves under `keep_prefix`, paired with a target name unique within the archive.
+///
+/// `rename_target` alone maps an internal `foo` onto `<keep_prefix>foo`, but that
+/// name may already be a public API symbol (e.g. internal `add` -> `myapp_add`
+/// when `myapp_add` is exported) or an earlier rename. Applying such a map would
+/// leave two definitions of the same name, which `list_symbols` cannot see (it
+/// dedups) but the consumer's linker hits as a duplicate symbol or a wrong bind.
+/// So a colliding target gets a numeric suffix until it is unique. Symbols are
+/// processed in sorted order to keep the map reproducible.
+fn build_renames(defined: &HashSet<String>, keep_prefix: &str) -> Vec<(String, String)> {
+    let mut symbols: Vec<&String> = defined.iter().collect();
+    symbols.sort();
+
+    let mut taken: HashSet<String> = defined.iter().cloned().collect();
+    let mut renames = Vec::new();
+    for symbol in symbols {
+        let Some(base) = rename_target(symbol, keep_prefix) else {
+            continue;
+        };
+        let mut target = base.clone();
+        let mut n = 1u32;
+        while taken.contains(&target) {
+            target = format!("{}_{}", base, n);
+            n += 1;
+        }
+        taken.insert(target.clone());
+        renames.push((symbol.clone(), target));
+    }
+    renames
+}
+
 /// Windows implementation: Renames symbols using llvm-objcopy on extracted objects
 pub(crate) fn patch_windows(
     static_lib: &Path,
@@ -120,33 +152,20 @@ pub(crate) fn patch_windows(
     eprintln!("Extracted {} objects.", obj_files.len());
     eprintln!("Found {} defined symbols.", defined_symbols.len());
 
-    // Step 2: Generate renames
-    let mut renames = Vec::new();
-    let mut kept_count = 0;
-    let mut renamed_count = 0;
-
-    for symbol in defined_symbols {
-        match rename_target(&symbol, keep_prefix) {
-            Some(new_name) => {
-                renames.push(format!("{} {}", symbol, new_name));
-                renamed_count += 1;
-            }
-            // Left public: either already prefixed (counts as kept API) or an
-            // MSVC-mangled name we skip silently.
-            None => {
-                if symbol.starts_with(keep_prefix) {
-                    kept_count += 1;
-                }
-            }
-        }
-    }
+    // Step 2: Generate renames (collision-aware; see build_renames).
+    let rename_pairs = build_renames(&defined_symbols, keep_prefix);
+    let kept_count = defined_symbols
+        .iter()
+        .filter(|s| s.starts_with(keep_prefix))
+        .count();
 
     eprintln!(
         "Renaming {} symbols (kept {} already prefixed).",
-        renamed_count, kept_count
+        rename_pairs.len(),
+        kept_count
     );
 
-    if renames.is_empty() {
+    if rename_pairs.is_empty() {
         eprintln!("No symbols to rename. Copying file...");
         fs::copy(static_lib, final_lib).expect("Failed to copy library");
         return;
@@ -154,8 +173,8 @@ pub(crate) fn patch_windows(
 
     let renames_path = temp_dir.join("renames.txt");
     let mut f = fs::File::create(&renames_path).expect("Failed to create renames file");
-    for line in renames {
-        writeln!(f, "{}", line).expect("Failed to write rename line");
+    for (from, to) in &rename_pairs {
+        writeln!(f, "{} {}", from, to).expect("Failed to write rename line");
     }
 
     // Step 3: Run llvm-objcopy on EACH object
@@ -506,7 +525,7 @@ mod tests {
     }
 
     /// Builds the rename map exactly as `patch_windows` does: collect the defined
-    /// globals across every object, then ask `rename_target` for each.
+    /// globals across every object, then run the collision-aware map builder.
     fn rename_map(
         objects: &[Vec<u8>],
         keep_prefix: &str,
@@ -515,10 +534,7 @@ mod tests {
         for obj in objects {
             collect_defined_globals(obj, &mut defined);
         }
-        defined
-            .into_iter()
-            .filter_map(|s| rename_target(&s, keep_prefix).map(|new| (s, new)))
-            .collect()
+        build_renames(&defined, keep_prefix).into_iter().collect()
     }
 
     #[test]
@@ -590,6 +606,31 @@ mod tests {
         assert!(
             map.is_empty(),
             "an undefined `rust_eh_personality` reference must not be renamed"
+        );
+    }
+
+    #[test]
+    fn internal_symbol_is_not_renamed_onto_an_existing_public_symbol() {
+        // A public `myapp_add` and an internal `add` in the same archive: naively
+        // renaming `add` -> `myapp_add` would leave two definitions of the public
+        // symbol. The collision must be disambiguated instead.
+        let map = rename_map(
+            &[make_def_object("add"), make_def_object("myapp_add")],
+            PREFIX,
+        );
+        assert_eq!(
+            map.get("myapp_add"),
+            None,
+            "the public symbol is kept as-is"
+        );
+        let renamed = map.get("add").expect("the internal symbol must be renamed");
+        assert_ne!(
+            renamed, "myapp_add",
+            "must not collide with the public symbol"
+        );
+        assert!(
+            renamed.starts_with(PREFIX),
+            "the renamed internal still lives under keep_prefix"
         );
     }
 
