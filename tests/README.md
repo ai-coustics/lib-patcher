@@ -96,7 +96,7 @@ cd tests\rust-consumer; cargo build --release; cargo run --release; cd ..\..
 
 Tests run automatically on:
 - Ubuntu (Linux x86_64)
-- macOS (both x86_64 and arm64 runners)
+- macOS (`macos-latest`, Apple silicon)
 - Windows (x86_64)
 
 See `.github/workflows/test.yml` for the full CI configuration.
