@@ -48,16 +48,14 @@ jobs:
 
       - name: Build testlib static library (Linux/macOS)
         if: runner.os != 'Windows'
-        run: |
-          cd tests/testlib
-          cargo build --release
+        working-directory: tests/testlib
+        run: cargo build --release
         shell: bash
 
       - name: Build testlib static library (Windows)
         if: runner.os == 'Windows'
-        run: |
-          cd tests/testlib
-          cargo build --release
+        working-directory: tests/testlib
+        run: cargo build --release
         shell: pwsh
 
       - name: Patch testlib (Linux/macOS)
@@ -80,16 +78,16 @@ jobs:
 
       - name: Build and run C test (Linux/macOS)
         if: runner.os != 'Windows'
+        working-directory: tests/c-consumer
         run: |
-          cd tests/c-consumer
           make
           ./testlib-test
         shell: bash
 
       - name: Build and run C test (Windows)
         if: runner.os == 'Windows'
+        working-directory: tests/c-consumer
         run: |
-          cd tests\c-consumer
           lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
           cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
           .\testlib-test.exe
@@ -97,16 +95,16 @@ jobs:
 
       - name: Build and run Rust test (Linux/macOS)
         if: runner.os != 'Windows'
+        working-directory: tests/rust-consumer
         run: |
-          cd tests/rust-consumer
           cargo build --release
           cargo run --release
         shell: bash
 
       - name: Build and run Rust test (Windows)
         if: runner.os == 'Windows'
+        working-directory: tests/rust-consumer
         run: |
-          cd tests/rust-consumer
           cargo build --release
           cargo run --release
         shell: pwsh
