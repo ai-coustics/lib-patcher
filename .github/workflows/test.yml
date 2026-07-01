@@ -31,20 +31,20 @@ jobs:
         run: cargo build --release
 
       - name: Run unit tests
-        run: cargo test --release
+        run: cargo test
 
       - name: Build testlib static library (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           cd tests/testlib
-          cargo +stable build --release
+          cargo build --release
         shell: bash
 
       - name: Build testlib static library (Windows)
         if: runner.os == 'Windows'
         run: |
           cd tests/testlib
-          cargo +stable build --release
+          cargo build --release
         shell: pwsh
 
       - name: Patch testlib (Linux/macOS)
