@@ -307,7 +307,12 @@ fn find_objcopy_tool() -> PathBuf {
         }
     }
 
-    panic!("Could not find 'llvm-objcopy' or 'rust-objcopy'.");
+    panic!(
+        "Windows patching renames symbols with llvm-objcopy (or rust-objcopy), but neither \
+         was found. MSVC's lib.exe/llvm-lib can archive but cannot rename symbols, so an \
+         objcopy is required. Install LLVM (provides llvm-objcopy) or add the Rust llvm-tools \
+         component with `rustup component add llvm-tools` (provides rust-objcopy)."
+    );
 }
 
 /// Maps a target architecture to its MSVC `/MACHINE` type (e.g. "x86_64" ->

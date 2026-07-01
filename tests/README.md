@@ -64,7 +64,9 @@ cargo build
 #### Windows
 
 Run from a Visual Studio Developer PowerShell so that `cl.exe` and `lib.exe`
-are on `PATH`. The static library uses the `.lib` extension here, and
+are on `PATH`. Patching also needs `llvm-objcopy` or `rust-objcopy` on `PATH`
+(from an LLVM install or `rustup component add llvm-tools`) to rename symbols;
+`lib.exe` alone cannot. The static library uses the `.lib` extension here, and
 `/machine:` must match the target architecture (`x64`, `ARM64`, ...).
 
 ```powershell

@@ -103,7 +103,10 @@ fn main() {
 
 ## Platform-Specific Tools Required
 
-- **Windows**: `lib.exe` (MSVC toolchain) or `llvm-lib` / `llvm-ar`
+- **Windows**: `llvm-objcopy` or `rust-objcopy` to rename symbols (from an LLVM
+  install, or `rustup component add llvm-tools`), **plus** an archiver: `lib.exe`
+  (MSVC toolchain), `llvm-lib`, or `llvm-ar`. MSVC's `lib.exe` alone is not
+  sufficient: it archives but cannot rename symbols.
 - **macOS**: `ld`, `nm`, `ar` (Xcode Command Line Tools)
 - **Linux**: `ld`, `objcopy`, `readelf`, `ar` or `llvm-ar`
 
