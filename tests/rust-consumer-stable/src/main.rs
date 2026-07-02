@@ -2,7 +2,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// External functions from the patched testlib (built with different Rust version)
+// External functions from the patched testlib (built with the same Rust version)
 unsafe extern "C" {
     fn testlib_add(a: i32, b: i32) -> i32;
     fn testlib_multiply(a: i32, b: i32) -> i32;
@@ -21,7 +21,7 @@ struct LocalData {
 }
 
 fn main() {
-    println!("Testing patched testlib from Rust (different version)");
+    println!("Testing patched testlib from Rust (same version)");
     println!("=====================================================\n");
 
     let mut errors = 0;
@@ -128,7 +128,7 @@ fn main() {
     println!("\n=====================================================");
     if errors == 0 {
         println!("✓ All tests passed!");
-        println!("✓ Successfully linked patched library with different Rust version");
+        println!("✓ Successfully linked patched library with the same Rust version");
         println!("✓ No symbol conflicts detected!");
     } else {
         println!("✗ {} test(s) failed!", errors);
