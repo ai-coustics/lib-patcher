@@ -24,6 +24,13 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # rust-consumer pins beta via its rust-toolchain.toml, exercising a consumer
+      # built with a different toolchain than the patched library. stable is
+      # installed after it so it stays the default for the tool build, unit tests,
+      # and testlib (which pins stable explicitly).
+      - name: Install Rust beta
+        uses: dtolnay/rust-toolchain@beta
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -36,6 +43,7 @@ jobs:
             .
             tests/testlib
             tests/rust-consumer
+            tests/rust-consumer-stable
 
       - name: Build lib-patcher CLI
         # Debug on purpose: the tool has no optimized behavior to test, but a
@@ -94,8 +102,16 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      - name: Build and run Rust test
+      # Consumer built with a different toolchain (beta) than the patched library.
+      - name: Build and run Rust test (different version)
         working-directory: tests/rust-consumer
+        run: |
+          cargo build --release
+          cargo run --release
+
+      # Consumer built with the same toolchain (stable) as the patched library.
+      - name: Build and run Rust test (same version)
+        working-directory: tests/rust-consumer-stable
         run: |
           cargo build --release
           cargo run --release
