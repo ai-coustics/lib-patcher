@@ -19,8 +19,11 @@ The c-consumer is trying to use the patched library from a C project.
 
 All of those projects should work.
 
-All three platforms are supported. Linux and macOS localize the non-API symbols;
-Windows renames them under the keep-prefix instead, because COFF makes localizing
-weak/COMDAT symbols unsafe.
+All three OS backends are supported (Linux, Windows, and Apple). The Apple backend
+covers macOS, iOS, tvOS, and visionOS, including the Intel simulator triples. Linux
+and Apple targets localize the non-API symbols; Windows renames them under the
+keep-prefix instead, because COFF makes localizing weak/COMDAT symbols unsafe.
 
-The msvc dev tools are in /c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64.
+The msvc dev tools (cl.exe/lib.exe) live under
+/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/<version>/bin/Hostx64/x64
+(pick the actual <version> with `ls` on that MSVC dir; it changes with VS updates).
