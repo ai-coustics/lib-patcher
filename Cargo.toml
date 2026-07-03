@@ -1,6 +1,7 @@
 [package]
 name = "lib-patcher"
-version = "0.1.0"
+version = "0.2.0"
+publish = false
 edition = "2024"
 authors = ["Stephan Eckes <stephan.eckes@ai-coustics.com>"]
 description = "Cross-platform symbol filtering for Rust static libraries to prevent linking conflicts"
@@ -11,7 +12,7 @@ keywords = ["static-library", "linking", "symbol-filtering", "build-tools", "ffi
 categories = ["development-tools::build-utils", "development-tools::ffi"]
 
 [dependencies]
-object = { version = "0.37", features = ["write_core", "read_core", "std"] }
+object = { version = "0.39", features = ["write_core", "read_core", "std"] }
 ar = "0.9"
 clap = { version = "4.5", features = ["derive"] }
 which = "8.0.0"
