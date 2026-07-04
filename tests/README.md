@@ -30,6 +30,16 @@ this works regardless of whether the consumer is built with the same or a
 different Rust toolchain: every non-API symbol is localized/renamed, so there is
 nothing left to collide.
 
+Linking an **unpatched** testlib into the consumer fails on Linux (rust-lld) and
+Windows (link.exe: LNK2005 + LNK1169) with duplicate symbol errors
+(`rust_eh_personality`, `std::panicking::EMPTY_PANIC`, ...), which is what makes
+patching load-bearing. macOS is the exception: ld64 resolves duplicate symbols
+pulled from static archives first-definition-wins, so an unpatched library still
+links there. Hiding symbols still matters on macOS for symbol-table hygiene, it
+just is not link-breaking, so the macOS run alone cannot prove patching works.
+The CI negative test asserts the unpatched link fails on Linux and Windows and
+skips that assertion on macOS.
+
 ## Running Tests
 
 ### Local Testing
@@ -108,8 +118,9 @@ See `.github/workflows/test.yml` for the full CI configuration.
 1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
 2. **C FFI**: C code can successfully link and call the patched library
 3. **Conflict-Free Linking**: A Rust program with its own (possibly identical) stdlib/dependency versions can link the patched library without conflicts
-4. **Platform Coverage**: Tests run on Linux, macOS, and Windows
-5. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
+4. **Load-Bearing Patching**: The negative test proves the unpatched library *fails* the same link on Linux and Windows (skipped on macOS, see above), so the positive test cannot silently become vacuous
+5. **Platform Coverage**: Tests run on Linux, macOS, and Windows
+6. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
 
 ## Why This Test Design?
 

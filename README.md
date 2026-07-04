@@ -167,7 +167,7 @@ for the automated CI runs.
 - **Conflict-free Rust**: A Rust program with its own (possibly identical) stdlib/dependency versions can link without conflicts
 - **Platform coverage**: CI runs on Linux, macOS, and Windows
 
-The `rust-consumer` test is the critical one - it uses the same dependencies (serde_json, rand) as the library. Without patching, this would fail with duplicate symbol errors. With patching, every non-API symbol is hidden, so it works regardless of the consumer's toolchain.
+The `rust-consumer` test is the critical one - it uses the same dependencies (serde_json, rand) as the library. On Linux (rust-lld) and Windows (link.exe: LNK2005 + LNK1169), linking an unpatched library fails with duplicate symbol errors, so those two are the consumer rows that actually discriminate patched from unpatched. macOS is different: ld64 resolves duplicate symbols pulled from static archives on a first-definition-wins basis rather than erroring, so an unpatched library still links there. Symbol hiding is still worth doing on macOS for symbol-table hygiene (a clean final binary or dylib, no re-export clashes), it just is not link-breaking, so the macOS CI row alone cannot prove that patching works. With patching, every non-API symbol is hidden, so the consumer links regardless of its toolchain.
 
 ## Inspiration
 
