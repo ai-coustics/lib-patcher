@@ -9,8 +9,14 @@ fn main() {
         .join("target")
         .join("release");
 
+    // Which archive to link. Defaults to the patched library; the CI negative
+    // test overrides this to the unpatched "testlib" to prove that an unpatched
+    // archive fails the link with duplicate-symbol errors.
+    let link_lib = env::var("TESTLIB_LINK_LIB").unwrap_or_else(|_| "testlib_patched".to_string());
+    println!("cargo:rerun-if-env-changed=TESTLIB_LINK_LIB");
+
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=testlib_patched");
+    println!("cargo:rustc-link-lib=static={link_lib}");
 
     // On Windows, ensure required system import libraries are linked.
     // The testlib depends on getrandom/rand which call into WinAPI
@@ -24,13 +30,14 @@ fn main() {
         println!("cargo:rustc-link-lib=ntdll");
     }
 
-    // Rerun if the library changes
-    println!(
-        "cargo:rerun-if-changed={}",
-        lib_dir.join("libtestlib_patched.a").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        lib_dir.join("testlib_patched.lib").display()
-    );
+    // Rerun if the library changes (patched or unpatched: the negative test
+    // links the unpatched one).
+    for name in [
+        "libtestlib_patched.a",
+        "testlib_patched.lib",
+        "libtestlib.a",
+        "testlib.lib",
+    ] {
+        println!("cargo:rerun-if-changed={}", lib_dir.join(name).display());
+    }
 }

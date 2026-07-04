@@ -109,6 +109,36 @@ jobs:
           cargo build --release
           cargo run --release
 
+      # Negative test: the UNPATCHED testlib must FAIL the same static link.
+      # This keeps the "patching is load-bearing" claim self-verifying and
+      # stops the positive test above from silently going vacuous if testlib
+      # and the consumer ever stop sharing conflicting symbols. TESTLIB_LINK_LIB
+      # points the consumer's build.rs at the unpatched archive.
+      #
+      # Skipped on macOS: ld64 resolves duplicate symbols pulled from static
+      # archives first-definition-wins rather than erroring, so an unpatched
+      # library links there anyway. The discriminating platforms are Linux
+      # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169).
+      - name: Assert unpatched testlib fails to link (Linux/Windows)
+        if: runner.os != 'macOS'
+        working-directory: tests/rust-consumer
+        env:
+          TESTLIB_LINK_LIB: testlib
+        shell: bash
+        run: |
+          set -o pipefail
+          if cargo build --release > neg.log 2>&1; then
+            echo "::error::unpatched testlib linked unexpectedly"
+            cat neg.log
+            exit 1
+          fi
+          grep -Eiq "duplicate symbol|LNK2005|LNK1169" neg.log || {
+            echo "::error::link failed but without a duplicate-symbol diagnostic"
+            cat neg.log
+            exit 1
+          }
+          echo "unpatched testlib failed to link with duplicate-symbol errors, as expected"
+
       # Consumer built with the same toolchain (stable) as the patched library.
       - name: Build and run Rust test (same version)
         working-directory: tests/rust-consumer-stable
