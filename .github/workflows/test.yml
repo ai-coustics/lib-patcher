@@ -118,9 +118,11 @@ jobs:
       # Skipped on macOS: ld64 resolves duplicate symbols pulled from static
       # archives first-definition-wins rather than erroring, so an unpatched
       # library links there anyway. The discriminating platforms are Linux
-      # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169).
-      - name: Assert unpatched testlib fails to link (Linux/Windows)
-        if: runner.os != 'macOS'
+      # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169). The two are split
+      # by shell because bash on the Windows runner would shadow MSVC's link.exe
+      # with Git's usr/bin/link.exe; pwsh keeps the MSVC linker on PATH.
+      - name: Assert unpatched testlib fails to link (Linux)
+        if: runner.os == 'Linux'
         working-directory: tests/rust-consumer
         env:
           TESTLIB_LINK_LIB: testlib
@@ -132,12 +134,32 @@ jobs:
             cat neg.log
             exit 1
           fi
-          grep -Eiq "duplicate symbol|LNK2005|LNK1169" neg.log || {
+          grep -Eiq "duplicate symbol" neg.log || {
             echo "::error::link failed but without a duplicate-symbol diagnostic"
             cat neg.log
             exit 1
           }
           echo "unpatched testlib failed to link with duplicate-symbol errors, as expected"
+
+      - name: Assert unpatched testlib fails to link (Windows)
+        if: runner.os == 'Windows'
+        working-directory: tests/rust-consumer
+        env:
+          TESTLIB_LINK_LIB: testlib
+        shell: pwsh
+        run: |
+          cargo build --release *> neg.log
+          $built = $LASTEXITCODE -eq 0
+          Get-Content neg.log
+          if ($built) {
+            Write-Output "::error::unpatched testlib linked unexpectedly"
+            exit 1
+          }
+          if (-not (Select-String -Path neg.log -Pattern 'LNK2005|LNK1169' -Quiet)) {
+            Write-Output "::error::link failed but without a duplicate-symbol diagnostic"
+            exit 1
+          }
+          Write-Output "unpatched testlib failed to link with duplicate-symbol errors, as expected"
 
       # Consumer built with the same toolchain (stable) as the patched library.
       - name: Build and run Rust test (same version)
