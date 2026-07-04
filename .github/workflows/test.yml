@@ -118,31 +118,14 @@ jobs:
       # Skipped on macOS: ld64 resolves duplicate symbols pulled from static
       # archives first-definition-wins rather than erroring, so an unpatched
       # library links there anyway. The discriminating platforms are Linux
-      # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169). The two are split
-      # by shell because bash on the Windows runner would shadow MSVC's link.exe
-      # with Git's usr/bin/link.exe; pwsh keeps the MSVC linker on PATH.
-      - name: Assert unpatched testlib fails to link (Linux)
-        if: runner.os == 'Linux'
-        working-directory: tests/rust-consumer
-        env:
-          TESTLIB_LINK_LIB: testlib
-        shell: bash
-        run: |
-          set -o pipefail
-          if cargo build --release > neg.log 2>&1; then
-            echo "::error::unpatched testlib linked unexpectedly"
-            cat neg.log
-            exit 1
-          fi
-          grep -Eiq "duplicate symbol" neg.log || {
-            echo "::error::link failed but without a duplicate-symbol diagnostic"
-            cat neg.log
-            exit 1
-          }
-          echo "unpatched testlib failed to link with duplicate-symbol errors, as expected"
-
-      - name: Assert unpatched testlib fails to link (Windows)
-        if: runner.os == 'Windows'
+      # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169).
+      #
+      # Runs under pwsh (preinstalled on every runner) so one step covers both
+      # platforms. bash is avoided because on the Windows runner it shadows
+      # MSVC's link.exe with Git's usr/bin/link.exe, breaking the link for an
+      # unrelated reason; pwsh keeps the MSVC linker on PATH.
+      - name: Assert unpatched testlib fails to link (Linux/Windows)
+        if: runner.os != 'macOS'
         working-directory: tests/rust-consumer
         env:
           TESTLIB_LINK_LIB: testlib
@@ -155,7 +138,7 @@ jobs:
             Write-Output "::error::unpatched testlib linked unexpectedly"
             exit 1
           }
-          if (-not (Select-String -Path neg.log -Pattern 'LNK2005|LNK1169' -Quiet)) {
+          if (-not (Select-String -Path neg.log -Pattern 'duplicate symbol|LNK2005|LNK1169' -Quiet)) {
             Write-Output "::error::link failed but without a duplicate-symbol diagnostic"
             exit 1
           }
