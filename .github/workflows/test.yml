@@ -145,15 +145,25 @@ jobs:
           fi
 
           fail=0
+          # report EXPECTED ACTUAL CASE BUILD TOOLCHAIN: print one aligned line,
+          # marking whether the actual link outcome matched the expectation.
+          report() {
+            local expected=$1 actual=$2 mark verb
+            if [ "$expected" = "$actual" ]; then mark="✓"; else mark="✗"; fail=1; fi
+            [ "$actual" = link ] && verb="linked" || verb="failed to link"
+            printf '%s  %-9s %-8s %-7s  expected to %-4s -> %s\n' \
+              "$mark" "$3" "$4" "$5" "$expected" "$verb"
+          }
+
           for profile in release release-lto; do
+            build=$([ "$profile" = release ] && echo separate || echo merged)
             for tc in beta stable; do
-              # Patched: must link and run.
+              # Patched: always expected to link (and run).
               if TESTLIB_PROFILE=$profile cargo +$tc run --release >out.log 2>&1; then
-                echo "ok   patched   $profile +$tc"
+                report link link patched "$build" "+$tc"
               else
-                echo "::error::patched $profile +$tc should link+run but failed"
+                report link fail patched "$build" "+$tc"
                 cat out.log
-                fail=1
               fi
 
               # Unpatched: expected to link only for separate std members with a
@@ -163,21 +173,23 @@ jobs:
                 exp=link
               fi
               if TESTLIB_PROFILE=$profile TESTLIB_LINK_LIB=testlib cargo +$tc build --release >out.log 2>&1; then
-                got=link
+                report "$exp" link unpatched "$build" "+$tc"
               else
-                got=fail
-              fi
-              if [ "$got" != "$exp" ]; then
-                echo "::error::unpatched $profile +$tc linked $got, expected $exp"
-                cat out.log
-                fail=1
-              elif [ "$got" = fail ] && ! grep -Eiq "duplicate symbol|LNK2005|LNK1169" out.log; then
-                echo "::error::unpatched $profile +$tc failed without a duplicate-symbol diagnostic"
-                cat out.log
-                fail=1
-              else
-                echo "ok   unpatched $profile +$tc -> $got"
+                report "$exp" fail unpatched "$build" "+$tc"
+                # A failure must be a duplicate-symbol failure, not something else.
+                if ! grep -Eiq "duplicate symbol|LNK2005|LNK1169" out.log; then
+                  echo "    (but the failure was not a duplicate-symbol error:)"
+                  cat out.log
+                  fail=1
+                fi
               fi
             done
           done
+
+          echo
+          if [ "$fail" = 0 ]; then
+            echo "all matrix expectations met"
+          else
+            echo "::error::one or more matrix expectations were not met (see ✗ above)"
+          fi
           exit $fail
