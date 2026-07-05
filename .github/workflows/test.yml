@@ -113,22 +113,22 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      # The full consumer matrix: two testlib build styles (separate std members
-      # vs LTO-merged) x two consumer toolchains (stable = same as testlib, beta
-      # = different). TESTLIB_PROFILE selects the build style, TESTLIB_LINK_LIB
-      # selects the patched or unpatched archive.
+      # The full consumer matrix: testlib built without and with LTO x two
+      # consumer toolchains (stable = same as testlib, beta = different).
+      # TESTLIB_PROFILE selects the build, TESTLIB_LINK_LIB the patched or
+      # unpatched archive.
       #
       #   * Patched: every combination must link AND run. This is what the tool
       #     guarantees, on every platform.
       #   * Unpatched: shows what patching is for. A static archive only collides
       #     when the consumer must pull an object that (re)defines std symbols:
-      #       - separate std members + same toolchain: the consumer already
-      #         defines them, so the archive's members are skipped -> links.
+      #       - non-LTO + same toolchain: std lives in separate archive members
+      #         the consumer already defines, so they are skipped -> links.
       #       - LTO folds std into the crate object the consumer must pull for the
       #         public API -> collides.
       #       - a different toolchain drags in the archive's own std -> collides.
       #       - macOS ld64 resolves archive duplicates first-definition-wins, so
-      #         nothing collides there regardless of build style or toolchain.
+      #         nothing collides there regardless of build or toolchain.
       #
       # If a "links" case starts failing or a "fails" case starts linking, the
       # linker's archive-member selection or rustc's LTO packaging changed.
@@ -156,7 +156,7 @@ jobs:
           }
 
           for profile in release release-lto; do
-            build=$([ "$profile" = release ] && echo separate || echo merged)
+            build=$([ "$profile" = release ] && echo non-lto || echo lto)
             for tc in beta stable; do
               # Patched: always expected to link (and run).
               if TESTLIB_PROFILE=$profile cargo +$tc run --release >out.log 2>&1; then
