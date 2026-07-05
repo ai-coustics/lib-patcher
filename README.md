@@ -152,7 +152,7 @@ The following are always left alone because they are needed for linking:
 - DWARF debug symbols (`DW.ref.*`, `GCC_except_table`)
 - Special linker symbols (`_GLOBAL_OFFSET_TABLE_`, `@`-prefixed symbols)
 
-### Platform Differences
+### When Patching Is Needed
 
 Whether an unpatched library actually breaks the link depends on the platform:
 
