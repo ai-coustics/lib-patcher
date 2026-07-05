@@ -1,60 +1,58 @@
 # Rust Consumer (Stable Toolchain)
 
-This is a variant of the `rust-consumer` test that uses the **same stable toolchain** as the `testlib` library.
+A variant of the `rust-consumer` test that links the patched `testlib` using the
+**same stable toolchain** that built `testlib`. This is the hardest case for
+symbol hiding.
 
 ## Purpose
 
-This test demonstrates the **expected limitation** when using lib-patcher with identical toolchains.
+`testlib` is built with stable and this consumer is also built with stable, so
+every shared dependency compiles to byte-identical symbols:
+
+- Same `serde` / `serde_json` version -> identical mangled symbols
+- Same toolchain -> identical std/core/alloc symbols and metadata hashes
+
+Without patching, linking the two together fails with duplicate-symbol errors on
+Linux and Windows (macOS's ld64 resolves archive duplicates first-wins instead;
+see [`../README.md`](../README.md)). A denylist that only hid std/core/alloc could
+not fix this: it cannot tell `testlib`'s `serde_json` apart from the consumer's,
+they are binary identical.
 
 ## Expected Behavior
 
-When you run:
+lib-patcher uses an allowlist: it keeps only the `testlib_*` public API and
+localizes/renames everything else. So even in this worst case the consumer links
+and runs cleanly:
+
 ```bash
 cargo build --release
+cargo run --release
+# ✓ All tests passed!
+# ✓ Successfully linked patched library with the same Rust version
 ```
-
-You will see **linker errors** for dependency symbols like:
-- `ryu::buffer::Buffer::format::...`
-- `gimli::arch::PowerPc64::name_to_register::...`
-- `serde_json::...`
-- etc.
-
-## Why This Happens
-
-Both `testlib` (built with stable) and this consumer (also stable) compile their dependencies identically:
-- Same `rand` version → identical symbols
-- Same `serde_json` version → identical symbols
-- Same toolchain → identical metadata hashes
-
-The lib-patcher **successfully hides all std/core/alloc symbols** (you won't see conflicts for those), but it **cannot** distinguish between "testlib's serde_json" and "consumer's serde_json" - they're binary identical.
 
 ## Verification
 
-Check that std symbols are properly hidden:
+The patched library exposes only the public API, so no std or dependency symbols
+are left to collide (build the CLI first with `cargo build`):
+
 ```bash
-# List symbols in the patched library
-../../target/release/lib-patcher \
-  --input ../testlib/target/release/libtestlib_patched.a \
-  --list | grep "_ZN3std"
-# Returns nothing - std symbols are successfully hidden ✓
+# The 8 testlib_ functions remain public (plus DW.ref.*, a kept DWARF symbol)
+../../target/debug/lib-patcher \
+  --input ../testlib/target/release/libtestlib_patched.a --list
 
-# But dependency symbols remain
-../../target/release/lib-patcher \
-  --input ../testlib/target/release/libtestlib_patched.a \
-  --list | grep "serde_json"
-# Shows serde_json symbols - these cause the conflicts
+# std and dependency symbols are gone
+../../target/debug/lib-patcher \
+  --input ../testlib/target/release/libtestlib_patched.a --list \
+  | grep -E "_ZN3std|serde_json"
+# Returns nothing
 ```
 
-## Solution
+## Why Two Rust Consumers?
 
-Use different toolchains (see `../rust-consumer/rust-toolchain.toml`):
-```toml
-[toolchain]
-channel = "beta"  # Different from testlib's stable
-```
+- `rust-consumer` links the patched library from a **different** toolchain (beta).
+- `rust-consumer-stable` (this one) links it from the **same** toolchain (stable),
+  the case a denylist approach used to fail.
 
-With different toolchains, the test passes successfully!
-
-## Conclusion
-
-This test **validates that the limitation exists** and shows it's an expected behavior, not a bug. The recommended approach is to use different toolchain versions, which is what the main test suite (`rust-consumer`) does.
+Both pass, which shows the allowlist makes patching work regardless of whether the
+consumer shares `testlib`'s toolchain and dependency versions.

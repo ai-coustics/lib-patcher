@@ -40,6 +40,14 @@ just is not link-breaking, so the macOS run alone cannot prove patching works.
 The CI negative test asserts the unpatched link fails on Linux and Windows and
 skips that assertion on macOS.
 
+### 4. `rust-consumer-stable/` - Same-Toolchain Rust Integration Test
+The same Rust program as `rust-consumer`, but pinned to the **same** stable
+toolchain that built `testlib` (via its `rust-toolchain.toml`). This is the
+hardest case: shared dependencies compile to byte-identical symbols, so a denylist
+that only hid std/core/alloc could not tell them apart. It passes anyway because
+the allowlist hides everything outside the `testlib_*` API. See
+[`rust-consumer-stable/README.md`](rust-consumer-stable/README.md).
+
 ## Running Tests
 
 ### Local Testing
@@ -67,8 +75,11 @@ cargo build
 # 4. Build and run the C consumer
 ( cd tests/c-consumer && make && ./testlib-test )
 
-# 5. Build and run the Rust consumer
+# 5. Build and run the Rust consumer (different toolchain: beta)
 ( cd tests/rust-consumer && cargo build --release && cargo run --release )
+
+# 6. Build and run the same-toolchain Rust consumer (stable, like testlib)
+( cd tests/rust-consumer-stable && cargo build --release && cargo run --release )
 ```
 
 #### Windows
@@ -100,8 +111,11 @@ cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib `
 .\testlib-test.exe
 cd ..\..
 
-# 5. Build and run the Rust consumer
+# 5. Build and run the Rust consumer (different toolchain: beta)
 cd tests\rust-consumer; cargo build --release; cargo run --release; cd ..\..
+
+# 6. Build and run the same-toolchain Rust consumer (stable, like testlib)
+cd tests\rust-consumer-stable; cargo build --release; cargo run --release; cd ..\..
 ```
 
 ### CI Testing
@@ -132,7 +146,8 @@ This test suite addresses the real-world scenario:
 
 By testing with:
 - A library and a consumer that both use stdlib and common crates (rand, serde)
-- A consumer that brings its own dependency versions
+- A consumer that brings its own dependency versions (different toolchain)
+- A consumer that shares testlib's toolchain, so its symbols are byte-identical
 - Both C and Rust consumers
 
 We ensure that `lib-patcher` solves the actual problem it was designed for: the
