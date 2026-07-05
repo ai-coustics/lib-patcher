@@ -152,6 +152,22 @@ The following are always left alone because they are needed for linking:
 - DWARF debug symbols (`DW.ref.*`, `GCC_except_table`)
 - Special linker symbols (`_GLOBAL_OFFSET_TABLE_`, `@`-prefixed symbols)
 
+### Platform Differences
+
+Whether an unpatched library actually breaks the link depends on the platform:
+
+- **Linux and Windows**: the link fails with duplicate-symbol errors whenever the
+  consumer must pull an object that redefines Rust std symbols. That happens with a
+  different toolchain, or with an LTO-built library even on the same toolchain.
+- **macOS**: `ld64` resolves archive duplicates first-definition-wins, so an
+  unpatched library links regardless.
+
+Patching is still worth doing on macOS. It keeps the library's internal and
+dependency symbols out of the consumer's symbol table, so nothing can bind to them
+by accident and the exported surface stays limited to your API; the result no
+longer depends on the linker happening to resolve duplicates in your favor; and you
+ship the same patched artifact through one build step on every platform.
+
 ## Testing
 
 Integration tests build a Rust static library with real dependencies (rand,

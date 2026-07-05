@@ -54,9 +54,9 @@ collides when the consumer must pull an object that (re)defines std symbols
 - **Different toolchain**: the consumer cannot satisfy testlib's references, so
   testlib's own std objects are pulled in and collide.
 - **macOS** (ld64): resolves archive duplicates first-definition-wins, so an
-  unpatched library links regardless. Hiding symbols still matters there for
-  symbol-table hygiene, it just is not link-breaking, so macOS alone cannot
-  prove patching works.
+  unpatched library links in every cell. macOS therefore cannot prove patching
+  works, so Linux and Windows carry that proof. (Patching still matters on macOS;
+  see [Platform Differences](../README.md#platform-differences) for why.)
 
 On Linux (rust-lld) and Windows (link.exe: LNK2005 + LNK1169) the failures are
 duplicate symbol errors. The CI matrix asserts each cell above (patched links
