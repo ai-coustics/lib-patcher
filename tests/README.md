@@ -11,6 +11,13 @@ A Rust static library with multiple dependencies to generate many symbols:
 - Uses standard library features (HashMap, Vec, String formatting)
 - Exports C-compatible functions with `testlib_` prefix
 
+It is built two ways so the consumer can be tested against both:
+- **`--release`** (default): the std runtime symbols (`rust_eh_personality`, ...)
+  stay in their own archive members.
+- **`--profile release-lto`** (LTO, `codegen-units = 1`): those symbols are
+  folded into the crate's own object, as a fully optimized shipped library
+  usually is. This changes whether an unpatched archive collides at link time.
+
 ### 2. `c-consumer/` - C Integration Test
 A C program that links against the patched static library:
 - Tests all exported functions
@@ -18,44 +25,54 @@ A C program that links against the patched static library:
 - Uses Makefile for Linux/macOS, cl.exe for Windows
 
 ### 3. `rust-consumer/` - Rust Integration Test
-A Rust program that links the patched static library. It uses the same crates as
-testlib (rand, serde, serde_json), so without patching their symbols would
-collide. The single crate is built with two toolchains to cover both consumer
-situations (see the CI workflow, or run it locally with `+beta` / `+stable`):
-
-- **`+beta`** - a *different* toolchain than testlib's stable. This is the
-  critical case: testlib's bundled std/dependency objects are pulled alongside
-  the consumer's own, so an unpatched archive fails to link.
-- **`+stable`** - the *same* toolchain as testlib. This is the case the old
-  denylist (hide only std/core/alloc) could not handle.
+A Rust program that links testlib. It uses the same crates as testlib (rand,
+serde, serde_json), so without patching their symbols would collide. One crate
+covers a full matrix: both testlib **build styles** (separate std members vs
+LTO-merged, via `TESTLIB_PROFILE`) against both consumer **toolchains**
+(`+stable` = same as testlib, `+beta` = different).
 
 lib-patcher uses an allowlist (keep only `testlib_*`, hide everything else), so
-both build and run cleanly: every non-API symbol is localized/renamed, leaving
-nothing to collide.
+the **patched** library links and runs in every cell of the matrix: on every
+platform, both build styles, both toolchains.
 
-Whether an **unpatched** testlib fails to link depends on the linker and the
-consumer's toolchain:
+The **unpatched** matrix shows what patching is for. A static archive only
+collides when the consumer must pull an object that (re)defines std symbols
+(`rust_eh_personality`, `std::panicking::EMPTY_PANIC`, ...):
 
-- **Different toolchain** (`+beta`) on Linux (rust-lld) or Windows (link.exe:
-  LNK2005 + LNK1169): fails with duplicate symbol errors (`rust_eh_personality`,
-  `std::panicking::EMPTY_PANIC`, ...). This is what makes patching load-bearing.
-- **Same toolchain** (`+stable`): the linker resolves the identical archive
-  members first-definition-wins, so even an unpatched archive links.
-- **macOS** (ld64): resolves archive duplicates first-wins regardless of
-  toolchain, so an unpatched library links there too. Hiding symbols still
-  matters on macOS for symbol-table hygiene, it just is not link-breaking.
+| testlib build | consumer toolchain | Linux / Windows | macOS |
+| --- | --- | --- | --- |
+| separate std members | same (`+stable`) | **links** | links |
+| separate std members | different (`+beta`) | **fails** | links |
+| LTO-merged | same (`+stable`) | **fails** | links |
+| LTO-merged | different (`+beta`) | **fails** | links |
 
-The CI negative test therefore builds with `+beta` and asserts the unpatched link
-fails on Linux and Windows; it is skipped on macOS.
+- **Separate std members + same toolchain**: the consumer already defines those
+  symbols, so the archive's std members are never pulled and there is no clash.
+- **LTO-merged**: std is folded into the crate's own object, which the consumer
+  must pull for the public API, so its definitions collide.
+- **Different toolchain**: the consumer cannot satisfy testlib's references, so
+  testlib's own std objects are pulled in and collide.
+- **macOS** (ld64): resolves archive duplicates first-definition-wins, so an
+  unpatched library links regardless. Hiding symbols still matters there for
+  symbol-table hygiene, it just is not link-breaking, so macOS alone cannot
+  prove patching works.
+
+On Linux (rust-lld) and Windows (link.exe: LNK2005 + LNK1169) the failures are
+duplicate symbol errors. The CI matrix asserts each cell above (patched links
+everywhere; unpatched links or fails as shown). If a "links" cell starts failing
+or a "fails" cell starts linking, the linker's archive-member selection or
+rustc's LTO packaging changed.
 
 ## Running Tests
 
 ### Local Testing
 
-Run the full flow from the repository root. The test library is built with
-`--release` because a release static library is what users actually ship and
-patch; the CLI is built in debug so its overflow and `debug_assert` checks
-stay active while it patches.
+Run the happy path from the repository root: build testlib, patch it, and link
+the consumers against the patched archive. The CLI is built in debug so its
+overflow and `debug_assert` checks stay active while it patches. This covers the
+patched cells; the full matrix (LTO build style and the unpatched cases in the
+table above) is exercised by CI, but you can reproduce any cell locally with
+`TESTLIB_PROFILE` and `TESTLIB_LINK_LIB` (see the Rust consumer's `build.rs`).
 
 #### Linux / macOS
 
@@ -129,8 +146,8 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
 2. **C FFI**: C code can successfully link and call the patched library
-3. **Conflict-Free Linking**: The Rust consumer links the patched library without conflicts under both a different toolchain (beta) and the same one as testlib (stable)
-4. **Load-Bearing Patching**: The negative test (built with beta) proves the *unpatched* library fails the same link on Linux and Windows (skipped on macOS, see above), so the positive tests cannot silently become vacuous
+3. **Conflict-Free Linking**: The patched library links and runs across the full matrix - both testlib build styles (separate std members and LTO-merged) and both consumer toolchains (same and different from testlib)
+4. **Load-Bearing Patching**: The same matrix links the *unpatched* archive and asserts it fails where it must (see the table above), so the patched cells cannot silently become vacuous
 5. **Platform Coverage**: Tests run on Linux, macOS, and Windows
 6. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
 
@@ -144,8 +161,8 @@ This test suite addresses the real-world scenario:
 
 By testing with:
 - A library and a consumer that both use stdlib and common crates (rand, serde)
-- The consumer built with a different toolchain than testlib (beta)
-- The consumer built with the same toolchain as testlib (stable)
+- Two testlib build styles: std in separate archive members, and LTO-merged
+- The consumer built both with the same toolchain as testlib and a different one
 - Both C and Rust consumers
 
 We ensure that `lib-patcher` solves the actual problem it was designed for: the

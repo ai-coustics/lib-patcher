@@ -11,3 +11,13 @@ crate-type = ["staticlib"]
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# A fully optimized build, as a shipped static library usually is. LTO folds the
+# std runtime symbols (rust_eh_personality, ...) into the crate's own object
+# instead of leaving them in separate archive members. The tests build testlib
+# both ways because it changes whether an unpatched archive collides at link
+# time (see tests/README.md).
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

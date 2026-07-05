@@ -17,16 +17,22 @@ fn main() {
     println!("cargo:rustc-env=CONSUMER_RUSTC={version}");
     println!("cargo:rerun-if-env-changed=RUSTC");
 
+    // Which testlib build to link against. Defaults to the plain release build
+    // (std symbols in separate archive members); the tests also point this at
+    // "release-lto" (std folded into the crate object) to cover both cases.
+    let profile = env::var("TESTLIB_PROFILE").unwrap_or_else(|_| "release".to_string());
+    println!("cargo:rerun-if-env-changed=TESTLIB_PROFILE");
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let lib_dir = PathBuf::from(&manifest_dir)
         .join("..")
         .join("testlib")
         .join("target")
-        .join("release");
+        .join(&profile);
 
-    // Which archive to link. Defaults to the patched library; the CI negative
-    // test overrides this to the unpatched "testlib" to prove that an unpatched
-    // archive fails the link with duplicate-symbol errors.
+    // Which archive to link. Defaults to the patched library; the negative test
+    // overrides this to the unpatched "testlib" to show that an unpatched
+    // archive can fail the link with duplicate-symbol errors.
     let link_lib = env::var("TESTLIB_LINK_LIB").unwrap_or_else(|_| "testlib_patched".to_string());
     println!("cargo:rerun-if-env-changed=TESTLIB_LINK_LIB");
 
