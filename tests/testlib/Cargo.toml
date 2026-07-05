@@ -12,11 +12,9 @@ rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# LTO (thin or fat) folds the std runtime symbols (rust_eh_personality, ...) into
-# the crate's own object instead of leaving them in separate archive members, as
-# an optimized shipped library is usually built. The tests build testlib both
-# with and without LTO because it changes whether an unpatched archive collides
-# at link time (see tests/README.md). codegen-units does not affect this.
+# release-lto folds the std runtime symbols into the crate's own object instead
+# of leaving them in separate archive members; the tests build both ways because
+# it changes whether an unpatched archive collides (see tests/README.md).
 [profile.release-lto]
 inherits = "release"
 lto = true

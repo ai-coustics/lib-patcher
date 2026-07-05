@@ -24,10 +24,9 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Both toolchains are installed: rust-consumer is built once with +beta
-      # (different toolchain than the patched library) and once with +stable
-      # (same as testlib). stable is installed last so it stays the default for
-      # the tool build, unit tests, and testlib (which pins stable explicitly).
+      # The consumer is built with both toolchains (see tests/README.md). Install
+      # stable last so it stays the default for the tool build, unit tests, and
+      # testlib (which pins stable).
       - name: Install Rust beta
         uses: dtolnay/rust-toolchain@beta
 
@@ -37,37 +36,32 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          # testlib and the consumer are separate crates under tests/, each with
-          # its own target dir; include them so their deps are cached too. The
-          # consumer's beta and stable artifacts coexist in one target dir
-          # (cargo keys fingerprints by rustc version).
+          # testlib and the consumer are separate crates with their own target
+          # dirs; list them so their deps are cached too.
           workspaces: |
             .
             tests/testlib
             tests/rust-consumer
 
       - name: Build lib-patcher CLI
-        # Debug on purpose: the tool has no optimized behavior to test, but a
-        # debug binary keeps overflow and debug_assert checks on while it patches
-        # a real library, and shares artifacts with the unit-test build below.
+        # Debug on purpose: keeps overflow and debug_assert checks on while it
+        # patches a real library (see tests/README.md).
         run: cargo build
 
       - name: Run unit tests
         run: cargo test
 
-      # Two build styles: the default release build keeps std runtime symbols in
-      # separate archive members, while the release-lto profile folds them into
-      # the crate's own object. This changes whether an unpatched archive
-      # collides at link time, so the consumer is tested against both.
+      # release (std in separate archive members) and release-lto (std folded
+      # into the crate object); the consumer is tested against both, see
+      # tests/README.md.
       - name: Build testlib static library (both build styles)
         working-directory: tests/testlib
         run: |
           cargo build --release
           cargo build --profile release-lto
 
-      # Point the object-parsing regression test at the real static library the
-      # toolchain just produced. Runs only on Windows: the guard is about COFF,
-      # and the earlier "Run unit tests" step skips it (env var unset).
+      # Windows only: point the COFF object-parsing regression test at the real
+      # library just built. The earlier unit-test step skips it (env var unset).
       - name: Verify object parses the real COFF archive (Windows)
         if: runner.os == 'Windows'
         env:
@@ -113,24 +107,11 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      # The full consumer matrix: testlib built without and with LTO x two
-      # consumer toolchains (stable = same as testlib, beta = different).
-      # TESTLIB_PROFILE selects the build, TESTLIB_LINK_LIB the patched or
-      # unpatched archive.
-      #
-      #   * Patched: every combination must link AND run. This is what the tool
-      #     guarantees, on every platform.
-      #   * Unpatched: shows what patching is for. A static archive only collides
-      #     when the consumer must pull an object that (re)defines std symbols:
-      #       - non-LTO + same toolchain: std lives in separate archive members
-      #         the consumer already defines, so they are skipped -> links.
-      #       - LTO folds std into the crate object the consumer must pull for the
-      #         public API -> collides.
-      #       - a different toolchain drags in the archive's own std -> collides.
-      #       - macOS ld64 resolves archive duplicates first-definition-wins, so
-      #         nothing collides there regardless of build or toolchain.
-      #
-      # If a "links" case starts failing or a "fails" case starts linking, the
+      # Full consumer matrix: {release, release-lto} x {stable, beta}, each
+      # against the patched and the unpatched archive. TESTLIB_PROFILE selects
+      # the build, TESTLIB_LINK_LIB the archive. Patched must link and run in
+      # every cell; unpatched must match the table in tests/README.md, which
+      # explains why each cell links or fails. A regressed cell means the
       # linker's archive-member selection or rustc's LTO packaging changed.
       - name: Rust consumer matrix (build styles x toolchains, patched + unpatched)
         working-directory: tests/rust-consumer
