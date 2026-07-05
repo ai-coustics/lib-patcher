@@ -119,30 +119,30 @@ jobs:
       # archives first-definition-wins rather than erroring, so an unpatched
       # library links there anyway. The discriminating platforms are Linux
       # (rust-lld) and Windows (link.exe: LNK2005 + LNK1169).
-      #
-      # Runs under pwsh (preinstalled on every runner) so one step covers both
-      # platforms. bash is avoided because on the Windows runner it shadows
-      # MSVC's link.exe with Git's usr/bin/link.exe, breaking the link for an
-      # unrelated reason; pwsh keeps the MSVC linker on PATH.
       - name: Assert unpatched testlib fails to link (Linux/Windows)
         if: runner.os != 'macOS'
         working-directory: tests/rust-consumer
         env:
           TESTLIB_LINK_LIB: testlib
-        shell: pwsh
+        shell: bash
         run: |
-          cargo build --release *> neg.log
-          $built = $LASTEXITCODE -eq 0
-          Get-Content neg.log
-          if ($built) {
-            Write-Output "::error::unpatched testlib linked unexpectedly"
+          # On the Windows runner, Git-bash's /usr/bin/link.exe shadows MSVC's
+          # link.exe on PATH; drop it so rustc resolves the MSVC linker (put
+          # there by msvc-dev-cmd). Not touched on Linux, which links via cc.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            rm -f /usr/bin/link.exe /usr/bin/link
+          fi
+          if cargo build --release > neg.log 2>&1; then
+            echo "::error::unpatched testlib linked unexpectedly"
+            cat neg.log
+            exit 1
+          fi
+          grep -Eiq "duplicate symbol|LNK2005|LNK1169" neg.log || {
+            echo "::error::link failed but without a duplicate-symbol diagnostic"
+            cat neg.log
             exit 1
           }
-          if (-not (Select-String -Path neg.log -Pattern 'duplicate symbol|LNK2005|LNK1169' -Quiet)) {
-            Write-Output "::error::link failed but without a duplicate-symbol diagnostic"
-            exit 1
-          }
-          Write-Output "unpatched testlib failed to link with duplicate-symbol errors, as expected"
+          echo "unpatched testlib failed to link with duplicate-symbol errors, as expected"
 
       # Consumer built with the same toolchain (stable) as the patched library.
       - name: Build and run Rust test (same version)
