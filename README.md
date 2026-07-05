@@ -2,7 +2,7 @@
 
 Cross-platform symbol filtering for Rust static libraries.
 
-Hides all symbols except those with a specified prefix to prevent linking conflicts when linking multiple Rust static libraries together. This was developed to address the requirement of shipping a compiled C library that gets used from Rust again, where symbol conflicts would otherwise occur.
+Hides all symbols except those with a specified prefix to prevent linking conflicts when linking multiple Rust static libraries together. This is useful when shipping a precompiled Rust static library that consumers link into their own Rust projects, where symbol conflicts would otherwise occur.
 
 ## The Problem
 
@@ -118,7 +118,7 @@ fn main() {
 1. Links all objects with `ld -r` into a single intermediate object
 2. Uses `readelf` to extract all GLOBAL and WEAK symbols (both DEFAULT and HIDDEN visibility)
 3. Filters to find symbols that don't match the prefix
-4. Uses `objcopy --localize-symbol` to make them local/private
+4. Uses `objcopy --localize-symbols` (names passed in a file) to make them local/private
 5. Creates final archive with `ar`
 
 #### macOS
@@ -154,20 +154,20 @@ The following are always left alone because they are needed for linking:
 
 ## Testing
 
-Comprehensive integration tests verify the tool works across all platforms.
-See [`tests/README.md`](tests/README.md) for step-by-step instructions on
-Linux, macOS, and Windows, and [`.github/workflows/test.yml`](.github/workflows/test.yml)
-for the automated CI runs.
+Integration tests build a Rust static library with real dependencies (rand,
+serde, serde_json), patch it to keep only its handful of public API functions
+while hiding the thousands of stdlib and dependency symbols, then link it from
+both C and Rust consumers on Linux, macOS, and Windows. The Rust consumer pulls
+in its own copies of the same dependencies, so it links cleanly only because
+patching hid the library's copies.
 
-### What Gets Tested
+To prove those tests are load-bearing, the same consumer also links the
+*unpatched* archive and asserts it fails with duplicate-symbol errors where it
+must.
 
-- **Real dependencies**: Uses rand, serde, serde_json to generate realistic symbol conflicts
-- **Symbol hiding**: Hides ~2800+ Rust stdlib/dependency symbols while keeping 8 API functions
-- **C interop**: C code successfully links and calls the patched library
-- **Conflict-free Rust**: A Rust program with its own (possibly identical) stdlib/dependency versions can link without conflicts
-- **Platform coverage**: CI runs on Linux, macOS, and Windows
-
-The `rust-consumer` test is the critical one - it uses the same dependencies (serde_json, rand) as the library. With patching, it links and runs across a full matrix: testlib built two ways, without and with LTO (LTO folds std runtime symbols into the crate object instead of leaving them in separate archive members), crossed with two consumer toolchains (the same as the library, and a different one). The *unpatched* matrix shows what patching is for: an unpatched archive fails to link on Linux (rust-lld) and Windows (link.exe: LNK2005 + LNK1169) whenever the consumer must pull an object that redefines std symbols - i.e. a different toolchain, or an LTO-merged build even with the same toolchain. It does *not* fail when std lives in separate members and the toolchain matches (the linker skips those members first-definition-wins), nor on macOS (ld64 resolves archive duplicates first-wins regardless). Symbol hiding still matters on macOS for symbol-table hygiene, it just is not link-breaking there. See [`tests/README.md`](tests/README.md) for the full table.
+See [`tests/README.md`](tests/README.md) for the test layout, the full
+patched/unpatched link matrix, and step-by-step build instructions per platform,
+and [`.github/workflows/test.yml`](.github/workflows/test.yml) for the CI runs.
 
 ## Inspiration
 

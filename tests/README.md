@@ -15,9 +15,8 @@ It is built two ways so the consumer can be tested against both:
 - **`--release`** (no LTO): the std runtime symbols (`rust_eh_personality`, ...)
   stay in their own archive members.
 - **`--profile release-lto`** (LTO): those symbols are folded into the crate's
-  own object, as a fully optimized shipped library usually is. LTO (thin or fat)
-  is what triggers this; it changes whether an unpatched archive collides at link
-  time.
+  own object, as a fully optimized shipped library usually is. This changes
+  whether an unpatched archive collides at link time (see the matrix below).
 
 ### 2. `c-consumer/` - C Integration Test
 A C program that links against the patched static library:
@@ -144,30 +143,14 @@ Tests run automatically on:
 
 See `.github/workflows/test.yml` for the full CI configuration.
 
-## What Gets Tested
+## What This Covers
 
-1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
-2. **C FFI**: C code can successfully link and call the patched library
-3. **Conflict-Free Linking**: The patched library links and runs across the full matrix - testlib built without and with LTO, and both consumer toolchains (same and different from testlib)
-4. **Load-Bearing Patching**: The same matrix links the *unpatched* archive and asserts it fails where it must (see the table above), so the patched cells cannot silently become vacuous
-5. **Platform Coverage**: Tests run on Linux, macOS, and Windows
-6. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
-
-## Why This Test Design?
-
-This test suite addresses the real-world scenario:
-- Third-party static libraries built with Rust
-- Need to integrate into projects that pull in the same stdlib and dependencies
-- Symbol conflicts from stdlib and common dependencies
-- Cross-platform compatibility requirements
-
-By testing with:
-- A library and a consumer that both use stdlib and common crates (rand, serde)
-- testlib built two ways, without and with LTO (std in separate archive members
-  vs folded into the crate object)
-- The consumer built both with the same toolchain as testlib and a different one
-- Both C and Rust consumers
-
-We ensure that `lib-patcher` solves the actual problem it was designed for: the
-allowlist keeps only the public API and hides everything else, so the consumer's
-own copies of those symbols never clash with the library's.
+- **Symbol patching**: keep only the `testlib_` public API, hide the Rust stdlib
+  and dependency symbols.
+- **C and Rust consumers**: both link and call the patched library.
+- **Conflict-free linking**: the patched library links and runs across the whole
+  matrix above (both build styles, both consumer toolchains).
+- **Load-bearing patching**: the *unpatched* archive is linked too and must fail
+  where the table says it fails, so the patched cells cannot silently pass for the
+  wrong reason.
+- **Platform coverage**: Linux, macOS, and Windows.
