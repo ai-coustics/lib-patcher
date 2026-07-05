@@ -145,14 +145,14 @@ jobs:
           fi
 
           fail=0
-          # report EXPECTED ACTUAL CASE BUILD TOOLCHAIN: print one aligned line,
-          # marking whether the actual link outcome matched the expectation.
+          # report EXPECTED ACTUAL CASE BUILD TOOLCHAIN: print one aligned line -
+          # the matrix conditions, then a check/cross, then the outcome. Matches
+          # get "(as expected)"; mismatches leave it off (more detail follows).
           report() {
-            local expected=$1 actual=$2 mark verb
-            if [ "$expected" = "$actual" ]; then mark="✓"; else mark="✗"; fail=1; fi
+            local expected=$1 actual=$2 mark verb suffix=""
+            if [ "$expected" = "$actual" ]; then mark="✓"; suffix=" (as expected)"; else mark="✗"; fail=1; fi
             [ "$actual" = link ] && verb="linked" || verb="failed to link"
-            printf '%s  %-9s %-8s %-7s  expected to %-4s -> %s\n' \
-              "$mark" "$3" "$4" "$5" "$expected" "$verb"
+            printf '%-9s %-8s %-7s  %s %s%s\n' "$3" "$4" "$5" "$mark" "$verb" "$suffix"
           }
 
           for profile in release release-lto; do
