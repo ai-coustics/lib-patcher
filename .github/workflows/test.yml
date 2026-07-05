@@ -24,10 +24,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # rust-consumer pins beta via its rust-toolchain.toml, exercising a consumer
-      # built with a different toolchain than the patched library. stable is
-      # installed after it so it stays the default for the tool build, unit tests,
-      # and testlib (which pins stable explicitly).
+      # Both toolchains are installed: rust-consumer is built once with +beta
+      # (different toolchain than the patched library) and once with +stable
+      # (same as testlib). stable is installed last so it stays the default for
+      # the tool build, unit tests, and testlib (which pins stable explicitly).
       - name: Install Rust beta
         uses: dtolnay/rust-toolchain@beta
 
@@ -37,13 +37,14 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          # testlib and the consumers are separate crates under tests/, each
-          # with its own target dir; include them so their deps are cached too.
+          # testlib and the consumer are separate crates under tests/, each with
+          # its own target dir; include them so their deps are cached too. The
+          # consumer's beta and stable artifacts coexist in one target dir
+          # (cargo keys fingerprints by rustc version).
           workspaces: |
             .
             tests/testlib
             tests/rust-consumer
-            tests/rust-consumer-stable
 
       - name: Build lib-patcher CLI
         # Debug on purpose: the tool has no optimized behavior to test, but a
@@ -102,18 +103,31 @@ jobs:
           .\testlib-test.exe
         shell: cmd
 
-      # Consumer built with a different toolchain (beta) than the patched library.
-      - name: Build and run Rust test (different version)
+      # The one rust-consumer crate is built with two toolchains. beta differs
+      # from testlib's stable, so its dependency/std symbols would collide
+      # without patching (the discriminating case). stable matches testlib, the
+      # case the old denylist could not handle; the allowlist makes it link too.
+      - name: Build and run Rust test (different toolchain, beta)
         working-directory: tests/rust-consumer
         run: |
-          cargo build --release
-          cargo run --release
+          cargo +beta build --release
+          cargo +beta run --release
 
-      # Negative test: the UNPATCHED testlib must FAIL the same static link.
-      # This keeps the "patching is load-bearing" claim self-verifying and
-      # stops the positive test above from silently going vacuous if testlib
-      # and the consumer ever stop sharing conflicting symbols. TESTLIB_LINK_LIB
-      # points the consumer's build.rs at the unpatched archive.
+      - name: Build and run Rust test (same toolchain, stable)
+        working-directory: tests/rust-consumer
+        run: |
+          cargo +stable build --release
+          cargo +stable run --release
+
+      # Negative test: the UNPATCHED testlib must FAIL the static link, proving
+      # patching is load-bearing and stopping the positive tests from silently
+      # going vacuous if testlib and the consumer ever stop sharing conflicting
+      # symbols. TESTLIB_LINK_LIB points build.rs at the unpatched archive.
+      #
+      # Uses +beta on purpose: with a different toolchain than testlib the std
+      # symbols genuinely collide. Under +stable (same toolchain) the linker
+      # resolves the identical archive members first-wins and links cleanly, so
+      # it would not demonstrate a failure.
       #
       # Skipped on macOS: ld64 resolves duplicate symbols pulled from static
       # archives first-definition-wins rather than erroring, so an unpatched
@@ -132,7 +146,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             rm -f /usr/bin/link.exe /usr/bin/link
           fi
-          if cargo build --release > neg.log 2>&1; then
+          if cargo +beta build --release > neg.log 2>&1; then
             echo "::error::unpatched testlib linked unexpectedly"
             cat neg.log
             exit 1
@@ -143,10 +157,3 @@ jobs:
             exit 1
           }
           echo "unpatched testlib failed to link with duplicate-symbol errors, as expected"
-
-      # Consumer built with the same toolchain (stable) as the patched library.
-      - name: Build and run Rust test (same version)
-        working-directory: tests/rust-consumer-stable
-        run: |
-          cargo build --release
-          cargo run --release

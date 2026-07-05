@@ -1,7 +1,22 @@
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
+    // Record which toolchain built this consumer so it can report it at runtime.
+    // The same crate is built with `+beta` (different toolchain than testlib) and
+    // `+stable` (same toolchain); this is how the two runs stay distinguishable.
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let version = Command::new(rustc)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown rustc".to_string());
+    println!("cargo:rustc-env=CONSUMER_RUSTC={version}");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let lib_dir = PathBuf::from(&manifest_dir)
         .join("..")

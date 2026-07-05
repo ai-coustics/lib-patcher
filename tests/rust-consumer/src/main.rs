@@ -2,7 +2,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// External functions from the patched testlib (built with a different Rust version)
+// External functions from the patched testlib. This consumer is built with
+// either the same toolchain as testlib (stable) or a different one (beta);
+// CONSUMER_RUSTC (set by build.rs) records which.
 unsafe extern "C" {
     fn testlib_add(a: i32, b: i32) -> i32;
     fn testlib_multiply(a: i32, b: i32) -> i32;
@@ -21,7 +23,10 @@ struct LocalData {
 }
 
 fn main() {
-    println!("Testing patched testlib from Rust (different version)");
+    println!(
+        "Testing patched testlib from Rust (consumer built with {})",
+        env!("CONSUMER_RUSTC")
+    );
     println!("=====================================================\n");
 
     let mut errors = 0;
@@ -128,7 +133,10 @@ fn main() {
     println!("\n=====================================================");
     if errors == 0 {
         println!("✓ All tests passed!");
-        println!("✓ Successfully linked patched library with a different Rust version");
+        println!(
+            "✓ Successfully linked patched library (consumer built with {})",
+            env!("CONSUMER_RUSTC")
+        );
         println!("✓ No symbol conflicts detected!");
     } else {
         println!("✗ {} test(s) failed!", errors);

@@ -18,35 +18,35 @@ A C program that links against the patched static library:
 - Uses Makefile for Linux/macOS, cl.exe for Windows
 
 ### 3. `rust-consumer/` - Rust Integration Test
-A Rust program that links the patched static library:
-- Uses its **own versions** of rand, serde, etc. (e.g. rand 0.9 vs testlib's 0.8)
-- Tests that the patched library doesn't conflict with the consumer's stdlib or
-  its (possibly identical) dependency symbols
-- Verifies no symbol conflicts occur after patching
-- This is the critical test for the symbol hiding functionality
+A Rust program that links the patched static library. It uses the same crates as
+testlib (rand, serde, serde_json), so without patching their symbols would
+collide. The single crate is built with two toolchains to cover both consumer
+situations (see the CI workflow, or run it locally with `+beta` / `+stable`):
+
+- **`+beta`** - a *different* toolchain than testlib's stable. This is the
+  critical case: testlib's bundled std/dependency objects are pulled alongside
+  the consumer's own, so an unpatched archive fails to link.
+- **`+stable`** - the *same* toolchain as testlib. This is the case the old
+  denylist (hide only std/core/alloc) could not handle.
 
 lib-patcher uses an allowlist (keep only `testlib_*`, hide everything else), so
-this works regardless of whether the consumer is built with the same or a
-different Rust toolchain: every non-API symbol is localized/renamed, so there is
-nothing left to collide.
+both build and run cleanly: every non-API symbol is localized/renamed, leaving
+nothing to collide.
 
-Linking an **unpatched** testlib into the consumer fails on Linux (rust-lld) and
-Windows (link.exe: LNK2005 + LNK1169) with duplicate symbol errors
-(`rust_eh_personality`, `std::panicking::EMPTY_PANIC`, ...), which is what makes
-patching load-bearing. macOS is the exception: ld64 resolves duplicate symbols
-pulled from static archives first-definition-wins, so an unpatched library still
-links there. Hiding symbols still matters on macOS for symbol-table hygiene, it
-just is not link-breaking, so the macOS run alone cannot prove patching works.
-The CI negative test asserts the unpatched link fails on Linux and Windows and
-skips that assertion on macOS.
+Whether an **unpatched** testlib fails to link depends on the linker and the
+consumer's toolchain:
 
-### 4. `rust-consumer-stable/` - Same-Toolchain Rust Integration Test
-The same Rust program as `rust-consumer`, but pinned to the **same** stable
-toolchain that built `testlib` (via its `rust-toolchain.toml`). This is the
-hardest case: shared dependencies compile to byte-identical symbols, so a denylist
-that only hid std/core/alloc could not tell them apart. It passes anyway because
-the allowlist hides everything outside the `testlib_*` API. See
-[`rust-consumer-stable/README.md`](rust-consumer-stable/README.md).
+- **Different toolchain** (`+beta`) on Linux (rust-lld) or Windows (link.exe:
+  LNK2005 + LNK1169): fails with duplicate symbol errors (`rust_eh_personality`,
+  `std::panicking::EMPTY_PANIC`, ...). This is what makes patching load-bearing.
+- **Same toolchain** (`+stable`): the linker resolves the identical archive
+  members first-definition-wins, so even an unpatched archive links.
+- **macOS** (ld64): resolves archive duplicates first-wins regardless of
+  toolchain, so an unpatched library links there too. Hiding symbols still
+  matters on macOS for symbol-table hygiene, it just is not link-breaking.
+
+The CI negative test therefore builds with `+beta` and asserts the unpatched link
+fails on Linux and Windows; it is skipped on macOS.
 
 ## Running Tests
 
@@ -75,11 +75,9 @@ cargo build
 # 4. Build and run the C consumer
 ( cd tests/c-consumer && make && ./testlib-test )
 
-# 5. Build and run the Rust consumer (different toolchain: beta)
-( cd tests/rust-consumer && cargo build --release && cargo run --release )
-
-# 6. Build and run the same-toolchain Rust consumer (stable, like testlib)
-( cd tests/rust-consumer-stable && cargo build --release && cargo run --release )
+# 5. Build and run the Rust consumer with both toolchains: a different one from
+#    testlib (beta) and the same one (stable). Both must link cleanly.
+( cd tests/rust-consumer && cargo +beta run --release && cargo +stable run --release )
 ```
 
 #### Windows
@@ -111,11 +109,11 @@ cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib `
 .\testlib-test.exe
 cd ..\..
 
-# 5. Build and run the Rust consumer (different toolchain: beta)
-cd tests\rust-consumer; cargo build --release; cargo run --release; cd ..\..
-
-# 6. Build and run the same-toolchain Rust consumer (stable, like testlib)
-cd tests\rust-consumer-stable; cargo build --release; cargo run --release; cd ..\..
+# 5. Build and run the Rust consumer with both toolchains (different + same).
+cd tests\rust-consumer
+cargo +beta run --release
+cargo +stable run --release
+cd ..\..
 ```
 
 ### CI Testing
@@ -131,8 +129,8 @@ See `.github/workflows/test.yml` for the full CI configuration.
 
 1. **Symbol Patching**: The library is patched to keep only the `testlib_` public API and hide everything else (Rust stdlib and dependency symbols)
 2. **C FFI**: C code can successfully link and call the patched library
-3. **Conflict-Free Linking**: A Rust program with its own (possibly identical) stdlib/dependency versions can link the patched library without conflicts
-4. **Load-Bearing Patching**: The negative test proves the unpatched library *fails* the same link on Linux and Windows (skipped on macOS, see above), so the positive test cannot silently become vacuous
+3. **Conflict-Free Linking**: The Rust consumer links the patched library without conflicts under both a different toolchain (beta) and the same one as testlib (stable)
+4. **Load-Bearing Patching**: The negative test (built with beta) proves the *unpatched* library fails the same link on Linux and Windows (skipped on macOS, see above), so the positive tests cannot silently become vacuous
 5. **Platform Coverage**: Tests run on Linux, macOS, and Windows
 6. **Real Dependencies**: Uses actual crates (rand, serde) to ensure realistic symbol counts
 
@@ -146,8 +144,8 @@ This test suite addresses the real-world scenario:
 
 By testing with:
 - A library and a consumer that both use stdlib and common crates (rand, serde)
-- A consumer that brings its own dependency versions (different toolchain)
-- A consumer that shares testlib's toolchain, so its symbols are byte-identical
+- The consumer built with a different toolchain than testlib (beta)
+- The consumer built with the same toolchain as testlib (stable)
 - Both C and Rust consumers
 
 We ensure that `lib-patcher` solves the actual problem it was designed for: the
