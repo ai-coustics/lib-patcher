@@ -8,14 +8,11 @@ LDFLAGS = -L../testlib/target/release -lpthread -ldl -lm
 # Determine platform
 UNAME_S := $(shell uname -s)
 
+LIB_FILE = ../testlib/target/release/libtestlib_patched.a
+
+# macOS needs the Security framework; Linux needs nothing extra.
 ifeq ($(UNAME_S),Darwin)
-    # macOS
     LDFLAGS += -framework Security
-    LIB_FILE = ../testlib/target/release/libtestlib_patched.a
-else
-    # Linux
-    LDFLAGS +=
-    LIB_FILE = ../testlib/target/release/libtestlib_patched.a
 endif
 
 all: testlib-test
