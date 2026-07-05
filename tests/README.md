@@ -55,8 +55,7 @@ collides when the consumer must pull an object that (re)defines std symbols
   testlib's own std objects are pulled in and collide.
 - **macOS** (ld64): resolves archive duplicates first-definition-wins, so an
   unpatched library links in every cell. macOS therefore cannot prove patching
-  works, so Linux and Windows carry that proof. (Patching still matters on macOS;
-  see [Platform Differences](../README.md#platform-differences) for why.)
+  works, so Linux and Windows carry that proof.
 
 On Linux (rust-lld) and Windows (link.exe: LNK2005 + LNK1169) the failures are
 duplicate symbol errors. The CI matrix asserts each cell above (patched links
