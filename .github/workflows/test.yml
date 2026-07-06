@@ -118,22 +118,27 @@ jobs:
           dumpbin /nologo /LINKERMEMBER:1 ..\testlib\target\release\testlib_patched.lib | findstr /C:"IMPORT_DESCRIPTOR" /C:"NULL_THUNK" /C:"__imp_" /C:"NULL_IMPORT"
           exit /b 0
 
-      # TEMPORARY diagnostic: the llvm-lib re-archive breaks link.exe imports
-      # (proven). Does MSVC lib.exe archive the same extracted members correctly?
-      #   lib.exe archives + imports present + runs -> fix is "archive with lib.exe"
-      #   lib.exe crashes (LNK1000)                 -> need to regenerate from .def
-      - name: Diagnose - archive extracted members with lib.exe
+      # TEMPORARY diagnostic: both librarians fail to re-archive loose short-import
+      # objects (lib.exe crashes LNK1000; llvm-lib yields an empty import table).
+      # Test the canonical path: DROP the original import members, REGENERATE an
+      # import library per DLL from a .def (decoded from the short-import members),
+      # and COMBINE those with the code objects into the final archive. This is
+      # the decisive test of whether preserving imports is implementable at all.
+      #   DEF RAN OK  -> regenerate-from-.def is the fix
+      #   crash       -> combining regenerated imports also breaks; not viable
+      - name: Diagnose - regenerate imports from .def and combine
         if: runner.os == 'Windows'
         working-directory: tests/c-consumer
         shell: bash
         run: |
           set -x
           set +e
-          mkdir -p rt && cd rt
+          rm -rf rt; mkdir -p rt; cd rt
           python <<'PY'
           data=open("../../testlib/target/release/testlib.lib","rb").read()
           assert data[:8]==b"!<arch>\n"
-          pos=8; i=0; files=[]
+          pos=8; i=0; code=[]; imports={}
+          DESC=[b"__IMPORT_DESCRIPTOR_", b"__NULL_IMPORT_DESCRIPTOR", b"_NULL_THUNK_DATA"]
           while pos+60<=len(data):
               hdr=data[pos:pos+60]
               name=hdr[0:16].decode('latin1').rstrip()
@@ -141,23 +146,37 @@ jobs:
               body=data[pos+60:pos+60+size]
               pos+=60+size+(size&1)
               if name in ("/","//"): continue
-              fn=f"{i}.obj"; open(fn,"wb").write(body); files.append(fn); i+=1
-          open("files.txt","w",newline="\n").write(" ".join(files))
-          print("members:", len(files))
+              if body[:2]==b"\x00\x00" and body[2:4]==b"\xff\xff":
+                  parts=body[20:].split(b"\x00")
+                  if len(parts)>=2:
+                      imports.setdefault(parts[1].decode(), []).append(parts[0].decode())
+              elif any(p in body for p in DESC):
+                  pass  # drop original descriptor; regenerated from .def
+              else:
+                  fn=f"{i}.obj"; open(fn,"wb").write(body); code.append(fn); i+=1
+          open("code.txt","w",newline="\n").write(" ".join(code))
+          defs=[]
+          for n,(dll,syms) in enumerate(imports.items()):
+              d=f"imp{n}.def"
+              with open(d,"w",newline="\n") as f:
+                  f.write(f"LIBRARY {dll}\nEXPORTS\n")
+                  for s in sorted(set(syms)): f.write(f"  {s}\n")
+              defs.append(f"imp{n}.def imp{n}.lib")
+          open("defs.txt","w",newline="\n").write("\n".join(defs))
+          print("code members:", len(code), "import DLLs:", len(imports))
+          for dll,syms in imports.items(): print("  ", dll, sorted(set(syms)))
           PY
-          objs=$(tr -d '\r' < files.txt)
-          lib //nologo //MACHINE:X64 //OUT:rt_msvc.lib $objs ; echo "lib.exe rc=$?"
+          while read d l; do llvm-lib //nologo //MACHINE:X64 //def:"$d" //out:"$l"; done < <(tr -d '\r' < defs.txt)
+          implibs=$(awk '{print $2}' defs.txt | tr -d '\r' | tr '\n' ' ')
+          code=$(tr -d '\r' < code.txt)
+          llvm-lib //nologo //MACHINE:X64 //OUT:final.lib $code $implibs ; echo "combine rc=$?"
           cd ..
           lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64
           SYS="ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib"
-          if [ -f rt/rt_msvc.lib ]; then
-            cl //nologo //Fe:rt_msvc.exe main.c rt/rt_msvc.lib $SYS
-            echo "--- rt_msvc.exe imports ---"
-            dumpbin //nologo //IMPORTS rt_msvc.exe | grep -iE "\.dll|ProcessPrng|SystemFunction|BCrypt|WaitOnAddress|Nt" | head -30
-            ./rt_msvc.exe && echo "MSVC RAN OK" || echo "MSVC CRASHED rc=$?"
-          else
-            echo "lib.exe produced no archive (likely crashed)"
-          fi
+          cl //nologo //Fe:def.exe main.c rt/final.lib $SYS
+          echo "--- def.exe imports ---"
+          dumpbin //nologo //IMPORTS def.exe | grep -iE "\.dll|ProcessPrng|SystemFunction|BCrypt|WaitOnAddress|Nt" | head -30
+          ./def.exe && echo "DEF RAN OK" || echo "DEF CRASHED rc=$?"
           exit 0
 
       - name: Build and run C test (Windows)
