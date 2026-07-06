@@ -92,6 +92,32 @@ jobs:
           ./testlib-test
         shell: bash
 
+      # TEMPORARY diagnostics: dump the import tables of the patched and unpatched
+      # exes so we can see what link.exe builds when the patched lib carries its
+      # own import members. Remove once the runtime crash is understood.
+      - name: Diagnose Windows import tables
+        if: runner.os == 'Windows'
+        working-directory: tests/c-consumer
+        shell: cmd
+        run: |
+          lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
+          set LIBS=ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
+          echo ===== PATCHED exe =====
+          cl /nologo /Fe:test-patched.exe main.c ..\testlib\target\release\testlib_patched.lib %LIBS%
+          echo --- dependents ---
+          dumpbin /nologo /DEPENDENTS test-patched.exe
+          echo --- imports ---
+          dumpbin /nologo /IMPORTS test-patched.exe
+          echo ===== UNPATCHED exe =====
+          cl /nologo /Fe:test-unpatched.exe main.c ..\testlib\target\release\testlib.lib %LIBS%
+          echo --- dependents ---
+          dumpbin /nologo /DEPENDENTS test-unpatched.exe
+          echo --- imports ---
+          dumpbin /nologo /IMPORTS test-unpatched.exe
+          echo ===== patched lib import members =====
+          dumpbin /nologo /LINKERMEMBER:1 ..\testlib\target\release\testlib_patched.lib | findstr /C:"IMPORT_DESCRIPTOR" /C:"NULL_THUNK" /C:"__imp_" /C:"NULL_IMPORT"
+          exit /b 0
+
       - name: Build and run C test (Windows)
         if: runner.os == 'Windows'
         working-directory: tests/c-consumer
