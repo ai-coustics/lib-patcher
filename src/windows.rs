@@ -25,7 +25,7 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     if let Ok(file) = File::parse(data) {
         for symbol in file.symbols() {
             if symbol.is_global()
-                && !symbol.is_undefined()
+                && symbol.is_definition()
                 && let Ok(name) = symbol.name()
             {
                 out.insert(name.to_string());
@@ -34,18 +34,22 @@ fn collect_defined_globals(data: &[u8], out: &mut HashSet<String>) {
     }
 }
 
-/// Inserts the names of all globally-visible, *undefined* symbols into `out`.
+/// Inserts the names of all globally-visible, external-reference symbols into `out`.
 ///
 /// These are external references the archive expects something else to define
 /// (a consumer callback, a system import). They are collected so a rename target
 /// never lands on one: renaming an internal onto a referenced name would satisfy
 /// that external reference with the internal definition instead of the intended
 /// provider.
+///
+/// COFF weak externals are section-0 references but `object` does not report them
+/// as `is_undefined()`, so reserve every global non-definition rather than only
+/// plain undefined externals.
 fn collect_undefined_globals(data: &[u8], out: &mut HashSet<String>) {
     if let Ok(file) = File::parse(data) {
         for symbol in file.symbols() {
             if symbol.is_global()
-                && symbol.is_undefined()
+                && !symbol.is_definition()
                 && let Ok(name) = symbol.name()
             {
                 out.insert(name.to_string());
@@ -571,6 +575,24 @@ mod tests {
         obj.write().unwrap()
     }
 
+    /// Object C: carries a COFF weak-external reference to `name`. In `object`
+    /// 0.39.x this is global and not `is_undefined()`, but it is still section 0
+    /// and must be treated as an external reference, not as a definition to rename.
+    fn make_weak_ref_object(name: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: true,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
     /// Builds the rename map exactly as `patch_windows` does: collect the defined
     /// globals across every object, then run the collision-aware map builder.
     fn rename_map(
@@ -616,6 +638,35 @@ mod tests {
         assert!(
             !from_ref.contains(RING_SYM),
             "an undefined reference must not be treated as a definition"
+        );
+    }
+
+    #[test]
+    fn weak_external_reference_is_not_collected_as_definition() {
+        // COFF weak externals are external references with storage class
+        // IMAGE_SYM_CLASS_WEAK_EXTERNAL. `object` reports them as global and not
+        // `is_undefined()`, so this pins that we use `is_definition()` instead.
+        let weak = make_weak_ref_object("rust_eh_personality");
+        let syms = coff_symbols(&weak);
+        let (_, sc, sec) = syms
+            .iter()
+            .find(|(n, _, _)| n == "rust_eh_personality")
+            .unwrap();
+        assert_eq!(*sc, object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL);
+        assert_eq!(*sec, 0, "weak external must be section-0 reference");
+
+        let mut defined = HashSet::new();
+        collect_defined_globals(&weak, &mut defined);
+        assert!(
+            !defined.contains("rust_eh_personality"),
+            "a COFF weak external reference must not be renamed as a definition"
+        );
+
+        let mut undefined = HashSet::new();
+        collect_undefined_globals(&weak, &mut undefined);
+        assert!(
+            undefined.contains("rust_eh_personality"),
+            "a COFF weak external reference should still reserve its original name"
         );
     }
 
