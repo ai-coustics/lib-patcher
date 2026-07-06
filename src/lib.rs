@@ -219,10 +219,10 @@ fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
 
         // An import-descriptor member (only `.idata$*` sections) carries the
         // `__IMPORT_DESCRIPTOR_<dll>`/`__NULL_IMPORT_DESCRIPTOR`/
-        // `<dll>_NULL_THUNK_DATA` COMDATs that pair with the short-import members
-        // (see windows::MemberKind). The Windows patcher keeps them unrenamed so
-        // they fold with the consumer's real import library, so exempt every
-        // global this member defines rather than flagging it as a leak.
+        // `<dll>_NULL_THUNK_DATA` COMDATs of a DLL import library (see
+        // windows::MemberKind). The Windows patcher regenerates these libraries,
+        // so such members appear in the output with their original (unprefixed)
+        // names; exempt every global this member defines rather than flag a leak.
         if is_import_descriptor_member(&file) {
             exempt.extend(defined.iter().map(|s| s.to_string()));
             continue;
@@ -243,7 +243,7 @@ fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
 /// Whether an archive member is a DLL import-descriptor object: it has at least
 /// one section and every section is an import-directory section (`.idata$*`).
 /// Such a member carries only import plumbing, never renamable code. Mirrors the
-/// classifier the Windows patcher uses to preserve these members verbatim.
+/// classifier the Windows patcher uses to identify import libraries.
 fn is_import_descriptor_member<'a>(file: &File<'a, &'a [u8]>) -> bool {
     let mut any = false;
     for section in file.sections() {
