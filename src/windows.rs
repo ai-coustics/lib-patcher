@@ -12,6 +12,9 @@ pub(crate) struct WindowsLibTool {
     pub tool: String,
     pub machine_type: Option<String>,
     pub is_llvm: bool,
+    /// Whether the tool can archive COFF short-import members. MSVC `lib.exe`
+    /// crashes on them (`LNK1000`); the LLVM librarians preserve them.
+    pub handles_import_members: bool,
 }
 
 /// Inserts the names of all globally-visible, *defined* symbols into `out`.
@@ -226,6 +229,14 @@ pub(crate) fn patch_windows(
         writeln!(f, "{} {}", from, to).expect("Failed to write rename line");
     }
 
+    // Pick the librarian up front: whether short-import members can be preserved
+    // depends on the tool (MSVC lib.exe crashes on them), and that decision gates
+    // the repackaging loop below.
+    let has_imports = obj_files
+        .iter()
+        .any(|(_, kind)| *kind == MemberKind::ShortImport);
+    let lib_cmd = get_windows_lib_tool(Some(target_arch), has_imports);
+
     // Step 3: Run llvm-objcopy on EACH object
     let objcopy = find_objcopy_tool();
     eprintln!("Using objcopy: {}", objcopy.display());
@@ -241,10 +252,20 @@ pub(crate) fn patch_windows(
                 eprintln!("Skipping non-COFF object {} (not archived).", i);
                 continue;
             }
-            // Import thunks: preserved unrenamed so consumers keep their imports.
+            // Import thunks are preserved unrenamed so consumers keep their
+            // imports, but only an LLVM librarian can archive them; MSVC lib.exe
+            // crashes (LNK1000), so with lib.exe we drop them as before.
             MemberKind::ShortImport => {
-                eprintln!("Preserving COFF short-import member {} unchanged.", i);
-                patched_files.push(obj_path.clone());
+                if lib_cmd.handles_import_members {
+                    eprintln!("Preserving COFF short-import member {} unchanged.", i);
+                    patched_files.push(obj_path.clone());
+                } else {
+                    eprintln!(
+                        "Dropping COFF short-import member {}: {} cannot archive import \
+                         members. Install LLVM tools (llvm-lib/llvm-ar) to preserve them.",
+                        i, lib_cmd.tool
+                    );
+                }
                 continue;
             }
             MemberKind::Coff => {}
@@ -276,7 +297,6 @@ pub(crate) fn patch_windows(
     // Step 4: Repackage
     eprintln!("Creating final library...");
 
-    let lib_cmd = get_windows_lib_tool(Some(target_arch));
     let final_lib_abs = if final_lib.is_absolute() {
         final_lib.to_path_buf()
     } else {
@@ -396,8 +416,15 @@ fn msvc_machine_type(arch: &str) -> Option<&'static str> {
     }
 }
 
-/// Determines the appropriate library tool for Windows
-fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
+/// Determines the appropriate library tool for Windows.
+///
+/// When `need_import_support` is set (the archive has COFF short-import members),
+/// an LLVM librarian is tried first: MSVC `lib.exe` crashes on those members
+/// (`LNK1000`), while `llvm-lib`/`llvm-ar` preserve them. Otherwise `lib.exe` is
+/// preferred. `lib.exe` is still returned as a last resort so patching an
+/// import-bearing archive without LLVM installed degrades to dropping the import
+/// members rather than failing outright (the caller checks `handles_import_members`).
+fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) -> WindowsLibTool {
     // Determine target architecture
     let target_arch_str = target_arch
         .map(|s| s.to_string())
@@ -414,62 +441,83 @@ fn get_windows_lib_tool(target_arch: Option<&str>) -> WindowsLibTool {
             }
         });
 
-    let host_arch = env::consts::ARCH;
-
     // Map architecture to MSVC machine type
     let machine_type = msvc_machine_type(&target_arch_str).map(String::from);
 
-    // Check if we're doing cross-architecture
-    let _is_cross = target_arch_str != host_arch;
+    // MSVC lib.exe: preferred for plain COFF, but cannot archive import members.
+    let msvc_lib = || {
+        Command::new("lib.exe").arg("/?").output().is_ok().then(|| {
+            eprintln!("Using lib.exe for Windows build");
+            WindowsLibTool {
+                tool: "lib.exe".to_string(),
+                machine_type: machine_type.clone(),
+                is_llvm: false,
+                handles_import_members: false,
+            }
+        })
+    };
 
-    // 1. Try finding lib.exe in PATH
-    if Command::new("lib.exe").arg("/?").output().is_ok() {
-        eprintln!("Using lib.exe for Windows build");
-        return WindowsLibTool {
-            tool: "lib.exe".to_string(),
-            machine_type,
-            is_llvm: false,
-        };
-    }
-
-    // 2. Try finding llvm-lib in PATH
-    if Command::new("llvm-lib").arg("/?").output().is_ok() {
-        eprintln!("Using llvm-lib for Windows build");
-        return WindowsLibTool {
-            tool: "llvm-lib".to_string(),
-            machine_type,
-            is_llvm: false,
-        };
-    }
-
-    // 3. Look in Visual Studio LLVM locations for llvm-lib
-    let vs_llvm_paths = [
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin\llvm-lib.exe",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
-    ];
-
-    for path_str in &vs_llvm_paths {
-        let path = PathBuf::from(path_str);
-        if path.exists() {
-            eprintln!("Using llvm-lib at {}", path.display());
-            return WindowsLibTool {
-                tool: path.to_string_lossy().to_string(),
-                machine_type,
-                is_llvm: false, // llvm-lib uses lib.exe flags
-            };
+    // llvm-lib: uses lib.exe-style flags and preserves import members. Try PATH,
+    // then the bundled Visual Studio LLVM locations.
+    let llvm_lib = || {
+        if Command::new("llvm-lib").arg("/?").output().is_ok() {
+            eprintln!("Using llvm-lib for Windows build");
+            return Some(WindowsLibTool {
+                tool: "llvm-lib".to_string(),
+                machine_type: machine_type.clone(),
+                is_llvm: false,
+                handles_import_members: true,
+            });
         }
-    }
+        let vs_llvm_paths = [
+            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin\llvm-lib.exe",
+            r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+            r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin\llvm-lib.exe",
+        ];
+        for path_str in &vs_llvm_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                eprintln!("Using llvm-lib at {}", path.display());
+                return Some(WindowsLibTool {
+                    tool: path.to_string_lossy().to_string(),
+                    machine_type: machine_type.clone(),
+                    is_llvm: false, // llvm-lib uses lib.exe flags
+                    handles_import_members: true,
+                });
+            }
+        }
+        None
+    };
 
-    // 5. Fall back to llvm-ar
-    if Command::new("llvm-ar").arg("--version").output().is_ok() {
-        eprintln!("Using llvm-ar for Windows build");
-        return WindowsLibTool {
-            tool: "llvm-ar".to_string(),
-            machine_type,
-            is_llvm: true,
-        };
+    // llvm-ar: ar-style flags, also preserves import members.
+    let llvm_ar = || {
+        Command::new("llvm-ar")
+            .arg("--version")
+            .output()
+            .is_ok()
+            .then(|| {
+                eprintln!("Using llvm-ar for Windows build");
+                WindowsLibTool {
+                    tool: "llvm-ar".to_string(),
+                    machine_type: machine_type.clone(),
+                    is_llvm: true,
+                    handles_import_members: true,
+                }
+            })
+    };
+
+    // Prefer an import-capable LLVM librarian when the archive needs it; MSVC
+    // lib.exe otherwise. lib.exe stays as a final fallback either way.
+    let probes: [&dyn Fn() -> Option<WindowsLibTool>; 3] = if need_import_support {
+        [&llvm_lib, &llvm_ar, &msvc_lib]
+    } else {
+        [&msvc_lib, &llvm_lib, &llvm_ar]
+    };
+    for probe in probes {
+        if let Some(tool) = probe() {
+            return tool;
+        }
     }
 
     // No suitable tool found
