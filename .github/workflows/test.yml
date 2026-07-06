@@ -118,6 +118,43 @@ jobs:
           dumpbin /nologo /LINKERMEMBER:1 ..\testlib\target\release\testlib_patched.lib | findstr /C:"IMPORT_DESCRIPTOR" /C:"NULL_THUNK" /C:"__imp_" /C:"NULL_IMPORT"
           exit /b 0
 
+      # TEMPORARY diagnostic: does the extract + llvm-lib re-archive round-trip
+      # ALONE break link.exe imports, independent of any renaming? Split the
+      # UNPATCHED lib into members, re-archive with llvm-lib exactly as
+      # patch_windows does (no renames), link, and check the import table.
+      #   empty imports / crash -> the llvm-lib re-archive is the culprit
+      #   full imports / runs   -> our rename/preserve logic is the culprit
+      - name: Diagnose - identity round-trip through llvm-lib
+        if: runner.os == 'Windows'
+        working-directory: tests/c-consumer
+        shell: bash
+        run: |
+          set -x
+          mkdir -p rt && cd rt
+          python <<'PY'
+          data=open("../../testlib/target/release/testlib.lib","rb").read()
+          assert data[:8]==b"!<arch>\n"
+          pos=8; i=0; files=[]
+          while pos+60<=len(data):
+              hdr=data[pos:pos+60]
+              name=hdr[0:16].decode('latin1').rstrip()
+              size=int(hdr[48:58].decode('latin1').strip())
+              body=data[pos+60:pos+60+size]
+              pos+=60+size+(size&1)
+              if name in ("/","//"): continue
+              fn=f"{i}.obj"; open(fn,"wb").write(body); files.append(fn); i+=1
+          open("files.txt","w").write("\n".join(files))
+          print("members:", len(files))
+          PY
+          llvm-lib //nologo //MACHINE:X64 //OUT:rt.lib $(cat files.txt)
+          cd ..
+          lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64 || true
+          cl //nologo //Fe:rt.exe main.c rt/rt.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
+          echo "--- rt.exe imports ---"
+          dumpbin //nologo //IMPORTS rt.exe | grep -iE "\.dll|ProcessPrng|SystemFunction|BCrypt|WaitOnAddress|Nt" | head -30
+          ./rt.exe && echo "RT RAN OK" || echo "RT CRASHED rc=$?"
+          exit 0
+
       - name: Build and run C test (Windows)
         if: runner.os == 'Windows'
         working-directory: tests/c-consumer
