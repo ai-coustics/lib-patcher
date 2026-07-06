@@ -166,10 +166,15 @@ jobs:
           print("code members:", len(code), "import DLLs:", len(imports))
           for dll,syms in imports.items(): print("  ", dll, sorted(set(syms)))
           PY
-          while read d l; do llvm-lib //nologo //MACHINE:X64 //def:"$d" //out:"$l"; done < <(tr -d '\r' < defs.txt)
-          implibs=$(awk '{print $2}' defs.txt | tr -d '\r' | tr '\n' ' ')
+          for d in imp*.def; do
+            llvm-lib //nologo //MACHINE:X64 //def:"$d" //out:"${d%.def}.lib" </dev/null
+          done
+          ls -l imp*.lib
+          implibs=$(ls imp*.lib | tr '\n' ' ')
           code=$(tr -d '\r' < code.txt)
-          llvm-lib //nologo //MACHINE:X64 //OUT:final.lib $code $implibs ; echo "combine rc=$?"
+          llvm-lib //nologo //MACHINE:X64 //OUT:final.lib $code $implibs </dev/null ; echo "combine rc=$?"
+          echo "--- final.lib has these import symbols? ---"
+          llvm-nm --print-armap final.lib 2>/dev/null | grep -iE "ProcessPrng|WaitOnAddress|__imp_" | head
           cd ..
           lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64
           SYS="ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib"
