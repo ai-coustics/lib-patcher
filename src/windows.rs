@@ -58,15 +58,29 @@ fn collect_undefined_globals(data: &[u8], out: &mut HashSet<String>) {
     }
 }
 
-/// Whether `data` is a regular COFF object the renamer can rewrite and the
-/// archiver can store.
-///
-/// Non-COFF members (LLVM bitcode, import descriptors) return `false`.
-/// `llvm-objcopy` rejects them, and passing them to `lib.exe` can crash the
-/// librarian (`LNK1000`). They duplicate the native COFF members, so they are
-/// dropped from the output.
-fn is_patchable_coff(data: &[u8]) -> bool {
-    matches!(File::parse(data), Ok(file) if file.format() == object::BinaryFormat::Coff)
+/// How an input archive member is treated when repackaging.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MemberKind {
+    /// A regular COFF object: rename its symbols and archive it.
+    Coff,
+    /// A COFF short-import member: the `Foo`/`__imp_Foo` thunks for a DLL export.
+    /// Not a regular COFF object, so it can't be renamed, but dropping it would
+    /// leave consumers with unresolved imports. Copy it through unchanged.
+    ShortImport,
+    /// Anything else (LLVM bitcode, import descriptors): drop it. `llvm-objcopy`
+    /// rejects these, `lib.exe` can crash on them (`LNK1000`), and they
+    /// duplicate the native COFF members.
+    Other,
+}
+
+/// Classifies an archive member so the repackager knows whether to rename it,
+/// copy it through unchanged, or drop it. See [`MemberKind`].
+fn classify_member(data: &[u8]) -> MemberKind {
+    match object::FileKind::parse(data) {
+        Ok(object::FileKind::Coff) => MemberKind::Coff,
+        Ok(object::FileKind::CoffImport) => MemberKind::ShortImport,
+        _ => MemberKind::Other,
+    }
 }
 
 /// Decides how a *defined* global symbol is treated under the allowlist.
@@ -176,7 +190,7 @@ pub(crate) fn patch_windows(
         let idx = obj_files.len();
         let obj_path = temp_dir.join(format!("{}.obj", idx));
         fs::write(&obj_path, data).expect("Failed to write object file");
-        obj_files.push((obj_path, is_patchable_coff(data)));
+        obj_files.push((obj_path, classify_member(data)));
 
         // Parse object file to find defined symbols, plus undefined references
         // that rename targets must not collide with.
@@ -219,13 +233,21 @@ pub(crate) fn patch_windows(
 
     let mut patched_files = Vec::new();
 
-    for (i, (obj_path, is_coff)) in obj_files.iter().enumerate() {
-        // Drop non-COFF members (LLVM bitcode, import descriptors): they carry no
-        // symbols to rename, llvm-objcopy can't process them, and archiving them
-        // can crash lib.exe (LNK1000). The native code lives in COFF members.
-        if !is_coff {
-            eprintln!("Skipping non-COFF object {} (not archived).", i);
-            continue;
+    for (i, (obj_path, kind)) in obj_files.iter().enumerate() {
+        match kind {
+            // Non-COFF members (LLVM bitcode, import descriptors): nothing to
+            // rename, and archiving them can crash lib.exe. See MemberKind.
+            MemberKind::Other => {
+                eprintln!("Skipping non-COFF object {} (not archived).", i);
+                continue;
+            }
+            // Import thunks: preserved unrenamed so consumers keep their imports.
+            MemberKind::ShortImport => {
+                eprintln!("Preserving COFF short-import member {} unchanged.", i);
+                patched_files.push(obj_path.clone());
+                continue;
+            }
+            MemberKind::Coff => {}
         }
 
         let patched_path = temp_dir.join(format!("{}_patched.obj", i));
@@ -769,15 +791,62 @@ mod tests {
         );
     }
 
+    /// Hand-builds a minimal COFF short-import member (the `Foo`/`__imp_Foo`
+    /// shape `lib.exe` emits for a DLL import). `object::File::parse` rejects
+    /// these, so the old boolean classifier dropped them from the output.
+    fn make_short_import_member(symbol: &str, dll: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        // symbol\0 dll\0 string block that follows the 20-byte header.
+        let mut str_data = Vec::new();
+        str_data.extend_from_slice(symbol.as_bytes());
+        str_data.push(0);
+        str_data.extend_from_slice(dll.as_bytes());
+        str_data.push(0);
+
+        data.extend_from_slice(&0u16.to_le_bytes()); // sig1 = IMAGE_FILE_MACHINE_UNKNOWN
+        data.extend_from_slice(&object::pe::IMPORT_OBJECT_HDR_SIG2.to_le_bytes()); // sig2
+        data.extend_from_slice(&0u16.to_le_bytes()); // version
+        data.extend_from_slice(&object::pe::IMAGE_FILE_MACHINE_AMD64.to_le_bytes()); // machine
+        data.extend_from_slice(&0u32.to_le_bytes()); // time_date_stamp
+        data.extend_from_slice(&(str_data.len() as u32).to_le_bytes()); // size_of_data
+        data.extend_from_slice(&0u16.to_le_bytes()); // ordinal_or_hint
+        // name_type: IMPORT_OBJECT_CODE | (IMPORT_OBJECT_NAME << shift)
+        let name_type = object::pe::IMPORT_OBJECT_CODE
+            | (object::pe::IMPORT_OBJECT_NAME << object::pe::IMPORT_OBJECT_NAME_SHIFT);
+        data.extend_from_slice(&name_type.to_le_bytes());
+        data.extend_from_slice(&str_data);
+        data
+    }
+
     #[test]
-    fn only_coff_objects_are_archived() {
+    fn regular_coff_objects_are_patched() {
         // Real COFF objects are patchable and kept.
-        assert!(is_patchable_coff(&make_def_object(RING_SYM)));
-        assert!(is_patchable_coff(&make_ref_object(RING_SYM)));
-        // Non-COFF members must be rejected so they are never fed to lib.exe:
+        assert_eq!(
+            classify_member(&make_def_object(RING_SYM)),
+            MemberKind::Coff
+        );
+        assert_eq!(
+            classify_member(&make_ref_object(RING_SYM)),
+            MemberKind::Coff
+        );
+        // Non-object members are dropped so they are never fed to lib.exe:
         // LLVM bitcode (BC\xC0\xDE magic) and arbitrary garbage.
-        assert!(!is_patchable_coff(&[0x42, 0x43, 0xc0, 0xde, 0, 0, 0, 0]));
-        assert!(!is_patchable_coff(b"not an object file"));
+        assert_eq!(
+            classify_member(&[0x42, 0x43, 0xc0, 0xde, 0, 0, 0, 0]),
+            MemberKind::Other
+        );
+        assert_eq!(classify_member(b"not an object file"), MemberKind::Other);
+    }
+
+    #[test]
+    fn short_import_members_are_preserved_not_dropped() {
+        // A short-import member must be classified for copy-through, not dropped.
+        let member = make_short_import_member("CreateFileW", "kernel32.dll");
+        assert!(
+            File::parse(&*member).is_err(),
+            "short-import members are not regular COFF objects"
+        );
+        assert_eq!(classify_member(&member), MemberKind::ShortImport);
     }
 
     #[test]
@@ -862,7 +931,7 @@ mod tests {
                 .expect("archive member")
                 .data(&*bytes)
                 .expect("member data");
-            if is_patchable_coff(data) {
+            if classify_member(data) == MemberKind::Coff {
                 any_coff = true;
             }
             collect_defined_globals(data, &mut defined);
