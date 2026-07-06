@@ -130,6 +130,7 @@ jobs:
         shell: bash
         run: |
           set -x
+          set +e
           mkdir -p rt && cd rt
           python <<'PY'
           data=open("../../testlib/target/release/testlib.lib","rb").read()
@@ -143,10 +144,10 @@ jobs:
               pos+=60+size+(size&1)
               if name in ("/","//"): continue
               fn=f"{i}.obj"; open(fn,"wb").write(body); files.append(fn); i+=1
-          open("files.txt","w").write("\n".join(files))
+          open("files.txt","w",newline="\n").write(" ".join(files))
           print("members:", len(files))
           PY
-          llvm-lib //nologo //MACHINE:X64 //OUT:rt.lib $(cat files.txt)
+          llvm-lib //nologo //MACHINE:X64 //OUT:rt.lib $(tr -d '\r' < files.txt)
           cd ..
           lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64 || true
           cl //nologo //Fe:rt.exe main.c rt/rt.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
