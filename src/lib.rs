@@ -158,34 +158,74 @@ fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
 }
 
 /// Returns the global symbols that violate the allowlist invariant: anything not
-/// matching `keep_prefix` and not one of the known compiler-internal exemptions.
+/// matching `keep_prefix`, not a known compiler-internal exemption, and not a
+/// proven Windows import symbol (see `import_exempt_symbols`).
 ///
 /// Such a symbol (Rust stdlib, a dependency) leaking out as global would defeat
 /// the purpose and risk the very conflicts patching is meant to prevent.
-///
-/// Windows import-library members (e.g. `ProcessPrng` from `bcryptprimitives`)
-/// are exempt: their names must match the system DLL exports, so they cannot be
-/// renamed, and duplicate imports do not conflict the way defined symbols do.
-/// Two things are exempted: any `__imp_<name>` thunk itself, and any bare `name`
-/// for which an `__imp_<name>` exists anywhere in the archive. This is broader
-/// than a strict per-member pairing check, but list_symbols keeps no
-/// section/kind info to prove a real import pair, and on Windows every defined
-/// non-API global is already renamed, so a bare name surviving *and* colliding
-/// with an `__imp_` is not a shape we produce.
-fn find_leaked_symbols<'a>(symbols: &'a [String], keep_prefix: &str) -> Vec<&'a str> {
-    let import_thunks: HashSet<&str> = symbols
-        .iter()
-        .filter_map(|s| s.strip_prefix("__imp_"))
-        .collect();
+fn find_leaked_symbols<'a>(
+    symbols: &'a [String],
+    keep_prefix: &str,
+    import_exempt: &HashSet<String>,
+) -> Vec<&'a str> {
     symbols
         .iter()
         .filter(|s| {
-            !symbol_is_allowed_global(s, keep_prefix)
-                && !s.starts_with("__imp_")
-                && !import_thunks.contains(s.as_str())
+            !symbol_is_allowed_global(s, keep_prefix) && !import_exempt.contains(s.as_str())
         })
         .map(String::as_str)
         .collect()
+}
+
+/// Collects the symbol names that belong to a Windows import within a *single*
+/// archive member, so the leak check can exempt them.
+///
+/// Import names (e.g. `ProcessPrng`/`__imp_ProcessPrng` from `bcryptprimitives`)
+/// must match the system DLL export, so the patchers cannot rename them
+/// (llvm-objcopy also fails on some import objects, which is how they reach the
+/// output unrenamed); duplicate imports do not conflict the way defined symbols
+/// do. For every member that defines an `__imp_<name>` slot, that `__imp_<name>`
+/// is exempt, and the bare `<name>` too when the *same* member also defines it
+/// (the co-located call thunk).
+///
+/// Proving the pair from one member's own symbols is the point: the previous
+/// archive-wide rule exempted a bare `<name>` whenever any `__imp_<name>`
+/// appeared anywhere, so a leaked, unrenamed definition in an unrelated member
+/// (e.g. an objcopy-failed COFF kept as-is) was waved through if some other
+/// member happened to import a like-named symbol.
+fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
+    let mut exempt = HashSet::new();
+    let Ok(bytes) = fs::read(lib) else {
+        return exempt;
+    };
+    let Ok(archive) = object::read::archive::ArchiveFile::parse(&*bytes) else {
+        return exempt;
+    };
+    for member in archive.members() {
+        let Ok(member) = member else { continue };
+        let Ok(data) = member.data(&*bytes) else {
+            continue;
+        };
+        let Ok(file) = File::parse(data) else {
+            continue;
+        };
+
+        // Defined globals in this member alone, so a pair must be co-located.
+        let defined: HashSet<&str> = file
+            .symbols()
+            .filter(|s| s.is_global() && s.is_definition())
+            .filter_map(|s| s.name().ok())
+            .collect();
+        for name in &defined {
+            if let Some(bare) = name.strip_prefix("__imp_") {
+                exempt.insert((*name).to_string());
+                if defined.contains(bare) {
+                    exempt.insert(bare.to_string());
+                }
+            }
+        }
+    }
+    exempt
 }
 
 /// Returns true if `name` carries `keep_prefix`, bare or in the macOS
@@ -303,8 +343,10 @@ fn verify_patched_lib(
     }
 
     // 4. Enforce the allowlist invariant: no global symbol may leak past the
-    // keep_prefix and the known compiler-internal exemptions.
-    let leaked = find_leaked_symbols(&symbols, keep_prefix);
+    // keep_prefix, the known compiler-internal exemptions, and the proven
+    // per-member Windows import symbols.
+    let import_exempt = import_exempt_symbols(static_lib);
+    let leaked = find_leaked_symbols(&symbols, keep_prefix, &import_exempt);
     if !leaked.is_empty() {
         return Err(format!(
             "{} global symbol(s) do not match keep-prefix '{}' and were not hidden, e.g.: {}",
@@ -458,6 +500,27 @@ mod tests {
         obj.write().unwrap()
     }
 
+    /// A minimal COFF object defining each of `names` as a global in `.text`,
+    /// used to exercise the Windows import-exemption path.
+    fn coff_object_with_globals(names: &[&str]) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = obj.section_id(StandardSection::Text);
+        let off = obj.append_section_data(text, &[0xc3], 1); // ret
+        for name in names {
+            obj.add_symbol(Symbol {
+                name: name.as_bytes().to_vec(),
+                value: off,
+                size: 1,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        obj.write().unwrap()
+    }
+
     /// Wraps `members` (name, bytes) into an `ar` archive in memory.
     fn build_archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -559,25 +622,85 @@ mod tests {
             "_ZN4core3fmt3fooE".to_string(), // a leaked stdlib symbol
         ];
         assert_eq!(
-            find_leaked_symbols(&symbols, KEEP),
+            find_leaked_symbols(&symbols, KEEP, &HashSet::new()),
             vec!["_ZN4core3fmt3fooE"]
         );
     }
 
     #[test]
-    fn leak_detection_exempts_paired_windows_import_thunks() {
-        // A Windows import pair: the __imp_ thunk and its bare name both name a
-        // system DLL export that cannot be renamed, so neither counts as a leak.
-        let paired = vec![
+    fn leak_detection_exempts_proven_import_symbols() {
+        // A Windows import pair named in the exempt set (proven co-located in one
+        // member by import_exempt_symbols) is not a leak.
+        let symbols = vec![
             "mylib_run".to_string(),
             "__imp_ProcessPrng".to_string(),
             "ProcessPrng".to_string(),
         ];
-        assert!(find_leaked_symbols(&paired, KEEP).is_empty());
+        let exempt = HashSet::from(["__imp_ProcessPrng".to_string(), "ProcessPrng".to_string()]);
+        assert!(find_leaked_symbols(&symbols, KEEP, &exempt).is_empty());
 
-        // A bare name with no paired __imp_ thunk is still a leak.
-        let unpaired = vec!["ProcessPrng".to_string()];
-        assert_eq!(find_leaked_symbols(&unpaired, KEEP), vec!["ProcessPrng"]);
+        // The same bare name with no proven import backing it is still a leak.
+        let unproven = vec!["ProcessPrng".to_string()];
+        assert_eq!(
+            find_leaked_symbols(&unproven, KEEP, &HashSet::new()),
+            vec!["ProcessPrng"]
+        );
+    }
+
+    #[test]
+    fn import_exempt_symbols_requires_a_colocated_pair() {
+        let archive = build_archive(&[
+            // A genuine import object: the IAT slot and its call thunk together.
+            (
+                "imp.o",
+                coff_object_with_globals(&["__imp_ProcessPrng", "ProcessPrng"]),
+            ),
+            // An IAT slot whose bare name is defined in no member.
+            ("iat.o", coff_object_with_globals(&["__imp_OnlyIat"])),
+        ]);
+        let f = write_temp("import-exempt", &archive);
+        let exempt = import_exempt_symbols(&f.0);
+
+        assert!(exempt.contains("__imp_ProcessPrng"));
+        assert!(exempt.contains("ProcessPrng"));
+        // The lone IAT slot is exempt, but its bare name is not conjured up.
+        assert!(exempt.contains("__imp_OnlyIat"));
+        assert!(!exempt.contains("OnlyIat"));
+    }
+
+    #[test]
+    fn leak_from_a_different_member_than_the_import_is_flagged() {
+        // The reviewer's case: one member imports __imp_Foo, an unrelated member
+        // leaks a bare, unrenamed Foo (as an objcopy-failed COFF kept as-is
+        // would). The bare Foo is not part of the import member, so it must be
+        // reported, not waved through by the __imp_ sibling elsewhere.
+        let archive = build_archive(&[
+            ("imp.o", coff_object_with_globals(&["__imp_Foo"])),
+            ("leak.o", coff_object_with_globals(&["Foo"])),
+        ]);
+        let f = write_temp("leak-diff-member", &archive);
+        let symbols = list_symbols(&f.0).unwrap();
+        let exempt = import_exempt_symbols(&f.0);
+
+        assert_eq!(find_leaked_symbols(&symbols, KEEP, &exempt), vec!["Foo"]);
+    }
+
+    #[test]
+    fn colocated_import_pair_is_not_flagged() {
+        // The happy shape: the import object carries both spellings, so the pair
+        // is exempt and the public API is untouched.
+        let archive = build_archive(&[
+            ("run.o", coff_object_with_globals(&["mylib_run"])),
+            (
+                "imp.o",
+                coff_object_with_globals(&["__imp_ProcessPrng", "ProcessPrng"]),
+            ),
+        ]);
+        let f = write_temp("import-pair", &archive);
+        let symbols = list_symbols(&f.0).unwrap();
+        let exempt = import_exempt_symbols(&f.0);
+
+        assert!(find_leaked_symbols(&symbols, KEEP, &exempt).is_empty());
     }
 
     #[test]
