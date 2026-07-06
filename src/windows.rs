@@ -229,9 +229,8 @@ pub(crate) fn patch_windows(
         writeln!(f, "{} {}", from, to).expect("Failed to write rename line");
     }
 
-    // Pick the librarian up front: whether short-import members can be preserved
-    // depends on the tool (MSVC lib.exe crashes on them), and that decision gates
-    // the repackaging loop below.
+    // Pick the librarian up front: it decides whether short-import members can be
+    // preserved, which gates the repackaging loop below.
     let has_imports = obj_files
         .iter()
         .any(|(_, kind)| *kind == MemberKind::ShortImport);
@@ -253,8 +252,8 @@ pub(crate) fn patch_windows(
                 continue;
             }
             // Import thunks are preserved unrenamed so consumers keep their
-            // imports, but only an LLVM librarian can archive them; MSVC lib.exe
-            // crashes (LNK1000), so with lib.exe we drop them as before.
+            // imports, but only an import-capable librarian can archive them;
+            // otherwise drop them (see handles_import_members).
             MemberKind::ShortImport => {
                 if lib_cmd.handles_import_members {
                     eprintln!("Preserving COFF short-import member {} unchanged.", i);
@@ -418,12 +417,10 @@ fn msvc_machine_type(arch: &str) -> Option<&'static str> {
 
 /// Determines the appropriate library tool for Windows.
 ///
-/// When `need_import_support` is set (the archive has COFF short-import members),
-/// an LLVM librarian is tried first: MSVC `lib.exe` crashes on those members
-/// (`LNK1000`), while `llvm-lib`/`llvm-ar` preserve them. Otherwise `lib.exe` is
-/// preferred. `lib.exe` is still returned as a last resort so patching an
-/// import-bearing archive without LLVM installed degrades to dropping the import
-/// members rather than failing outright (the caller checks `handles_import_members`).
+/// `need_import_support` (the archive has COFF short-import members) prefers an
+/// import-capable LLVM librarian over `lib.exe`; see `handles_import_members`.
+/// `lib.exe` stays a last resort so an import-bearing archive still patches
+/// without LLVM (the caller then drops the import members).
 fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) -> WindowsLibTool {
     // Determine target architecture
     let target_arch_str = target_arch
@@ -444,7 +441,6 @@ fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) ->
     // Map architecture to MSVC machine type
     let machine_type = msvc_machine_type(&target_arch_str).map(String::from);
 
-    // MSVC lib.exe: preferred for plain COFF, but cannot archive import members.
     let msvc_lib = || {
         Command::new("lib.exe").arg("/?").output().is_ok().then(|| {
             eprintln!("Using lib.exe for Windows build");
@@ -457,8 +453,7 @@ fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) ->
         })
     };
 
-    // llvm-lib: uses lib.exe-style flags and preserves import members. Try PATH,
-    // then the bundled Visual Studio LLVM locations.
+    // llvm-lib uses lib.exe-style flags; try PATH, then bundled VS LLVM locations.
     let llvm_lib = || {
         if Command::new("llvm-lib").arg("/?").output().is_ok() {
             eprintln!("Using llvm-lib for Windows build");
@@ -490,7 +485,7 @@ fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) ->
         None
     };
 
-    // llvm-ar: ar-style flags, also preserves import members.
+    // llvm-ar uses ar-style flags.
     let llvm_ar = || {
         Command::new("llvm-ar")
             .arg("--version")
