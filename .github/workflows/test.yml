@@ -118,13 +118,11 @@ jobs:
           dumpbin /nologo /LINKERMEMBER:1 ..\testlib\target\release\testlib_patched.lib | findstr /C:"IMPORT_DESCRIPTOR" /C:"NULL_THUNK" /C:"__imp_" /C:"NULL_IMPORT"
           exit /b 0
 
-      # TEMPORARY diagnostic: does the extract + llvm-lib re-archive round-trip
-      # ALONE break link.exe imports, independent of any renaming? Split the
-      # UNPATCHED lib into members, re-archive with llvm-lib exactly as
-      # patch_windows does (no renames), link, and check the import table.
-      #   empty imports / crash -> the llvm-lib re-archive is the culprit
-      #   full imports / runs   -> our rename/preserve logic is the culprit
-      - name: Diagnose - identity round-trip through llvm-lib
+      # TEMPORARY diagnostic: the llvm-lib re-archive breaks link.exe imports
+      # (proven). Does MSVC lib.exe archive the same extracted members correctly?
+      #   lib.exe archives + imports present + runs -> fix is "archive with lib.exe"
+      #   lib.exe crashes (LNK1000)                 -> need to regenerate from .def
+      - name: Diagnose - archive extracted members with lib.exe
         if: runner.os == 'Windows'
         working-directory: tests/c-consumer
         shell: bash
@@ -147,13 +145,19 @@ jobs:
           open("files.txt","w",newline="\n").write(" ".join(files))
           print("members:", len(files))
           PY
-          llvm-lib //nologo //MACHINE:X64 //OUT:rt.lib $(tr -d '\r' < files.txt)
+          objs=$(tr -d '\r' < files.txt)
+          lib //nologo //MACHINE:X64 //OUT:rt_msvc.lib $objs ; echo "lib.exe rc=$?"
           cd ..
-          lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64 || true
-          cl //nologo //Fe:rt.exe main.c rt/rt.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
-          echo "--- rt.exe imports ---"
-          dumpbin //nologo //IMPORTS rt.exe | grep -iE "\.dll|ProcessPrng|SystemFunction|BCrypt|WaitOnAddress|Nt" | head -30
-          ./rt.exe && echo "RT RAN OK" || echo "RT CRASHED rc=$?"
+          lib //def:bcryptprimitives.def //out:bcryptprimitives.lib //machine:x64
+          SYS="ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib"
+          if [ -f rt/rt_msvc.lib ]; then
+            cl //nologo //Fe:rt_msvc.exe main.c rt/rt_msvc.lib $SYS
+            echo "--- rt_msvc.exe imports ---"
+            dumpbin //nologo //IMPORTS rt_msvc.exe | grep -iE "\.dll|ProcessPrng|SystemFunction|BCrypt|WaitOnAddress|Nt" | head -30
+            ./rt_msvc.exe && echo "MSVC RAN OK" || echo "MSVC CRASHED rc=$?"
+          else
+            echo "lib.exe produced no archive (likely crashed)"
+          fi
           exit 0
 
       - name: Build and run C test (Windows)
