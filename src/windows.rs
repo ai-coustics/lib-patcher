@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::File;
-use object::{Object as ObjectTrait, ObjectSymbol};
+use object::{Object as ObjectTrait, ObjectSection, ObjectSymbol};
 
 pub(crate) struct WindowsLibTool {
     pub tool: String,
@@ -67,23 +67,80 @@ enum MemberKind {
     /// A regular COFF object: rename its symbols and archive it.
     Coff,
     /// A COFF short-import member: the `Foo`/`__imp_Foo` thunks for a DLL export.
-    /// Not a regular COFF object, so it can't be renamed, but dropping it would
-    /// leave consumers with unresolved imports. Copy it through unchanged.
+    /// Not a regular COFF object, so it can't be renamed. See [`is_import_member`].
     ShortImport,
-    /// Anything else (LLVM bitcode, import descriptors): drop it. `llvm-objcopy`
-    /// rejects these, `lib.exe` can crash on them (`LNK1000`), and they
-    /// duplicate the native COFF members.
+    /// An import-descriptor object: the `.idata$*` head/tail members
+    /// (`__IMPORT_DESCRIPTOR_<dll>`, `__NULL_IMPORT_DESCRIPTOR`,
+    /// `<dll>_NULL_THUNK_DATA`) that pair with the short-import members to form a
+    /// DLL's import library. A regular COFF object by format, but it carries only
+    /// import plumbing, so it is copied through verbatim rather than renamed. See
+    /// [`is_import_member`].
+    ImportDescriptor,
+    /// Anything else (LLVM bitcode): drop it. `llvm-objcopy` rejects these,
+    /// `lib.exe` can crash on them (`LNK1000`), and they duplicate the native
+    /// COFF members.
     Other,
+}
+
+impl MemberKind {
+    /// Whether the member is part of a DLL import library and must be preserved
+    /// byte-for-byte rather than renamed.
+    ///
+    /// Short-import and import-descriptor members together form the import
+    /// library rustc emits for a `raw-dylib` dependency. Their symbols
+    /// (`__imp_<fn>`, `__IMPORT_DESCRIPTOR_<dll>`, `__NULL_IMPORT_DESCRIPTOR`,
+    /// `<dll>_NULL_THUNK_DATA`) are `SELECT_ANY` COMDATs shared by every import
+    /// library for that DLL; the consumer's linker folds them with the copies in
+    /// the real system import library it also links. Renaming or re-emitting any
+    /// of them breaks that folding and yields a corrupt import directory (the
+    /// process then faults at load with `0xC0000005`), so the whole import
+    /// library is copied through unchanged as a unit.
+    fn is_import_member(self) -> bool {
+        matches!(self, MemberKind::ShortImport | MemberKind::ImportDescriptor)
+    }
 }
 
 /// Classifies an archive member so the repackager knows whether to rename it,
 /// copy it through unchanged, or drop it. See [`MemberKind`].
 fn classify_member(data: &[u8]) -> MemberKind {
     match object::FileKind::parse(data) {
+        Ok(object::FileKind::Coff) if is_import_descriptor_object(data) => {
+            MemberKind::ImportDescriptor
+        }
         Ok(object::FileKind::Coff) => MemberKind::Coff,
         Ok(object::FileKind::CoffImport) => MemberKind::ShortImport,
         _ => MemberKind::Other,
     }
+}
+
+/// Whether a COFF object is an import-descriptor member: it has at least one
+/// section and every section is an import-directory section (`.idata$*`). Such
+/// objects carry only the DLL import plumbing (see [`MemberKind::is_import_member`]),
+/// never Rust code, so they are preserved verbatim instead of renamed.
+fn is_import_descriptor_object(data: &[u8]) -> bool {
+    let Ok(file) = File::parse(data) else {
+        return false;
+    };
+    let mut any = false;
+    for section in file.sections() {
+        any = true;
+        match section.name() {
+            Ok(name) if name.starts_with(".idata") => {}
+            _ => return false,
+        }
+    }
+    any
+}
+
+/// Whether `symbol` names DLL import plumbing that must never be renamed: the
+/// COMDAT head/tail symbols an import library shares across every copy for a
+/// given DLL. See [`MemberKind::is_import_member`]. The 32-bit toolchain adds a
+/// leading underscore, so match on a contained/suffix pattern rather than an
+/// exact prefix.
+fn is_import_machinery(symbol: &str) -> bool {
+    symbol.contains("__IMPORT_DESCRIPTOR_")
+        || symbol.contains("__NULL_IMPORT_DESCRIPTOR")
+        || symbol.ends_with("_NULL_THUNK_DATA")
 }
 
 /// Decides how a *defined* global symbol is treated under the allowlist.
@@ -109,6 +166,12 @@ fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
     // MSVC-mangled names (??...) must be left alone; everything else (including
     // .weak symbols, which would otherwise trigger LNK2005) gets renamed.
     if symbol.starts_with("??") {
+        return None;
+    }
+    // DLL import plumbing must keep its name so it folds with the consumer's real
+    // import library; renaming it corrupts the import directory. See
+    // MemberKind::is_import_member.
+    if is_import_machinery(symbol) {
         return None;
     }
     Some(format!("{}{}", keep_prefix, symbol))
@@ -229,11 +292,9 @@ pub(crate) fn patch_windows(
         writeln!(f, "{} {}", from, to).expect("Failed to write rename line");
     }
 
-    // Pick the librarian up front: it decides whether short-import members can be
-    // preserved, which gates the repackaging loop below.
-    let has_imports = obj_files
-        .iter()
-        .any(|(_, kind)| *kind == MemberKind::ShortImport);
+    // Pick the librarian up front: it decides whether import-library members can
+    // be preserved, which gates the repackaging loop below.
+    let has_imports = obj_files.iter().any(|(_, kind)| kind.is_import_member());
     let lib_cmd = get_windows_lib_tool(Some(target_arch), has_imports);
 
     // Step 3: Run llvm-objcopy on EACH object
@@ -245,22 +306,24 @@ pub(crate) fn patch_windows(
 
     for (i, (obj_path, kind)) in obj_files.iter().enumerate() {
         match kind {
-            // Non-COFF members (LLVM bitcode, import descriptors): nothing to
-            // rename, and archiving them can crash lib.exe. See MemberKind.
+            // Non-COFF members (LLVM bitcode): nothing to rename, and archiving
+            // them can crash lib.exe. See MemberKind.
             MemberKind::Other => {
                 eprintln!("Skipping non-COFF object {} (not archived).", i);
                 continue;
             }
-            // Import thunks are preserved unrenamed so consumers keep their
-            // imports, but only an import-capable librarian can archive them;
-            // otherwise drop them (see handles_import_members).
-            MemberKind::ShortImport => {
+            // Import-library members are preserved verbatim so consumers keep
+            // their imports, but only an import-capable librarian can archive
+            // them; otherwise drop them (see handles_import_members). The whole
+            // import library moves as a unit, so short-import and descriptor
+            // members share this fate. See MemberKind::is_import_member.
+            MemberKind::ShortImport | MemberKind::ImportDescriptor => {
                 if lib_cmd.handles_import_members {
-                    eprintln!("Preserving COFF short-import member {} unchanged.", i);
+                    eprintln!("Preserving COFF import member {} unchanged.", i);
                     patched_files.push(obj_path.clone());
                 } else {
                     eprintln!(
-                        "Dropping COFF short-import member {}: {} cannot archive import \
+                        "Dropping COFF import member {}: {} cannot archive import \
                          members. Install LLVM tools (llvm-lib/llvm-ar) to preserve them.",
                         i, lib_cmd.tool
                     );
@@ -890,6 +953,66 @@ mod tests {
             "short-import members are not regular COFF objects"
         );
         assert_eq!(classify_member(&member), MemberKind::ShortImport);
+    }
+
+    /// Builds a COFF object whose only section is an import-directory section
+    /// (`.idata$2`) defining `symbol`, mirroring the `__IMPORT_DESCRIPTOR_<dll>`
+    /// head/tail members rustc emits alongside the short-import members.
+    fn make_import_descriptor_object(symbol: &str) -> Vec<u8> {
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let sec = obj.add_section(Vec::new(), b".idata$2".to_vec(), object::SectionKind::Data);
+        let off = obj.append_section_data(sec, &[0u8; 20], 4);
+        obj.add_symbol(Symbol {
+            name: symbol.as_bytes().to_vec(),
+            value: off,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(sec),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
+    #[test]
+    fn import_descriptor_members_are_preserved_not_renamed() {
+        // An all-`.idata` COFF object is the import library's descriptor head/tail.
+        // It parses as regular COFF but must be preserved verbatim, not renamed,
+        // so its COMDATs fold with the consumer's real import library.
+        let member = make_import_descriptor_object("__IMPORT_DESCRIPTOR_foo");
+        assert!(
+            File::parse(&*member).is_ok(),
+            "descriptor members are regular COFF objects"
+        );
+        assert_eq!(classify_member(&member), MemberKind::ImportDescriptor);
+        assert!(MemberKind::ImportDescriptor.is_import_member());
+        assert!(MemberKind::ShortImport.is_import_member());
+        assert!(!MemberKind::Coff.is_import_member());
+        assert!(!MemberKind::Other.is_import_member());
+
+        // A descriptor's defined global must never enter the rename map, or its
+        // renamed COMDAT would no longer fold with the real import library.
+        let map = rename_map(&[member], PREFIX);
+        assert!(
+            map.is_empty(),
+            "import-descriptor symbols must not be renamed"
+        );
+    }
+
+    #[test]
+    fn import_machinery_symbols_are_not_renamed() {
+        // The COMDAT head/tail symbols an import library shares across every copy
+        // for a DLL must keep their names. Bare and 32-bit underscore-decorated.
+        for s in [
+            "__IMPORT_DESCRIPTOR_bcryptprimitives",
+            "___IMPORT_DESCRIPTOR_bcryptprimitives",
+            "__NULL_IMPORT_DESCRIPTOR",
+            "___NULL_IMPORT_DESCRIPTOR",
+            "bcryptprimitives_NULL_THUNK_DATA",
+        ] {
+            assert_eq!(rename_target(s, PREFIX), None, "{s} must not be renamed");
+        }
     }
 
     #[test]

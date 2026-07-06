@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use object::read::File;
-use object::{Object as ObjectTrait, ObjectSymbol};
+use object::{Object as ObjectTrait, ObjectSection, ObjectSymbol};
 
 /// Patches a static library to hide all symbols except those matching the specified prefix.
 ///
@@ -216,6 +216,18 @@ fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
             .filter(|s| s.is_global() && s.is_definition())
             .filter_map(|s| s.name().ok())
             .collect();
+
+        // An import-descriptor member (only `.idata$*` sections) carries the
+        // `__IMPORT_DESCRIPTOR_<dll>`/`__NULL_IMPORT_DESCRIPTOR`/
+        // `<dll>_NULL_THUNK_DATA` COMDATs that pair with the short-import members
+        // (see windows::MemberKind). The Windows patcher keeps them unrenamed so
+        // they fold with the consumer's real import library, so exempt every
+        // global this member defines rather than flagging it as a leak.
+        if is_import_descriptor_member(&file) {
+            exempt.extend(defined.iter().map(|s| s.to_string()));
+            continue;
+        }
+
         for name in &defined {
             if let Some(bare) = name.strip_prefix("__imp_") {
                 exempt.insert((*name).to_string());
@@ -226,6 +238,22 @@ fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
         }
     }
     exempt
+}
+
+/// Whether an archive member is a DLL import-descriptor object: it has at least
+/// one section and every section is an import-directory section (`.idata$*`).
+/// Such a member carries only import plumbing, never renamable code. Mirrors the
+/// classifier the Windows patcher uses to preserve these members verbatim.
+fn is_import_descriptor_member<'a>(file: &File<'a, &'a [u8]>) -> bool {
+    let mut any = false;
+    for section in file.sections() {
+        any = true;
+        match section.name() {
+            Ok(name) if name.starts_with(".idata") => {}
+            _ => return false,
+        }
+    }
+    any
 }
 
 /// Returns true if `name` carries `keep_prefix`, bare or in the macOS
@@ -521,6 +549,27 @@ mod tests {
         obj.write().unwrap()
     }
 
+    /// A COFF object whose only section is an import-directory section
+    /// (`.idata$2`) defining `name`, mirroring an import library's
+    /// `__IMPORT_DESCRIPTOR_<dll>` head/tail member.
+    fn coff_import_descriptor_object(name: &str) -> Vec<u8> {
+        use object::SectionKind;
+        let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let sec = obj.add_section(Vec::new(), b".idata$2".to_vec(), SectionKind::Data);
+        let off = obj.append_section_data(sec, &[0u8; 20], 4);
+        obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: off,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(sec),
+            flags: SymbolFlags::None,
+        });
+        obj.write().unwrap()
+    }
+
     /// Wraps `members` (name, bytes) into an `ar` archive in memory.
     fn build_archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -666,6 +715,49 @@ mod tests {
         // The lone IAT slot is exempt, but its bare name is not conjured up.
         assert!(exempt.contains("__imp_OnlyIat"));
         assert!(!exempt.contains("OnlyIat"));
+    }
+
+    #[test]
+    fn import_descriptor_members_are_exempt() {
+        // The import library's descriptor head/tail members are preserved
+        // unrenamed by the Windows patcher, so their COMDAT globals
+        // (`__IMPORT_DESCRIPTOR_<dll>` etc.) must not be flagged as leaks even
+        // though they carry no keep-prefix.
+        let archive = build_archive(&[
+            ("run.o", coff_object_with_globals(&["mylib_run"])),
+            (
+                "desc.o",
+                coff_import_descriptor_object("__IMPORT_DESCRIPTOR_foo"),
+            ),
+            (
+                "null.o",
+                coff_import_descriptor_object("__NULL_IMPORT_DESCRIPTOR"),
+            ),
+        ]);
+        let f = write_temp("import-descriptor", &archive);
+        let symbols = list_symbols(&f.0).unwrap();
+        let exempt = import_exempt_symbols(&f.0);
+
+        assert!(exempt.contains("__IMPORT_DESCRIPTOR_foo"));
+        assert!(exempt.contains("__NULL_IMPORT_DESCRIPTOR"));
+        assert!(
+            find_leaked_symbols(&symbols, KEEP, &exempt).is_empty(),
+            "import-descriptor globals must not be flagged as leaks"
+        );
+
+        // The exemption is scoped to the all-`.idata` member: the same name
+        // defined in an ordinary code member is still a leak.
+        let leak = build_archive(&[(
+            "leak.o",
+            coff_object_with_globals(&["__IMPORT_DESCRIPTOR_foo"]),
+        )]);
+        let lf = write_temp("import-descriptor-leak", &leak);
+        let lsyms = list_symbols(&lf.0).unwrap();
+        let lexempt = import_exempt_symbols(&lf.0);
+        assert_eq!(
+            find_leaked_symbols(&lsyms, KEEP, &lexempt),
+            vec!["__IMPORT_DESCRIPTOR_foo"]
+        );
     }
 
     #[test]
