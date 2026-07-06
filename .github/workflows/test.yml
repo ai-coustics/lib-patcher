@@ -153,7 +153,7 @@ jobs:
               else
                 report "$exp" fail unpatched "$build" "+$tc"
                 # A failure must be a duplicate-symbol failure, not something else.
-                if ! grep -Eiq "duplicate symbol|LNK2005|LNK1169" out.log; then
+                if ! grep -Eiq "duplicate symbol|multiple definition|LNK2005|LNK1169" out.log; then
                   echo "    (but the failure was not a duplicate-symbol error:)"
                   cat out.log
                   fail=1
