@@ -217,12 +217,10 @@ fn import_exempt_symbols(lib: &Path) -> HashSet<String> {
             .filter_map(|s| s.name().ok())
             .collect();
 
-        // An import-descriptor member (only `.idata$*` sections) carries the
-        // `__IMPORT_DESCRIPTOR_<dll>`/`__NULL_IMPORT_DESCRIPTOR`/
-        // `<dll>_NULL_THUNK_DATA` COMDATs of a DLL import library (see
-        // windows::MemberKind). The Windows patcher regenerates these libraries,
-        // so such members appear in the output with their original (unprefixed)
-        // names; exempt every global this member defines rather than flag a leak.
+        // An import-descriptor member (only `.idata$*` sections) carries a DLL
+        // import library's COMDAT plumbing, which the Windows patcher regenerates
+        // with its original (unprefixed) names. Exempt every global it defines
+        // rather than flag a leak.
         if is_import_descriptor_member(&file) {
             exempt.extend(defined.iter().map(|s| s.to_string()));
             continue;
@@ -719,10 +717,9 @@ mod tests {
 
     #[test]
     fn import_descriptor_members_are_exempt() {
-        // The import library's descriptor head/tail members are preserved
-        // unrenamed by the Windows patcher, so their COMDAT globals
-        // (`__IMPORT_DESCRIPTOR_<dll>` etc.) must not be flagged as leaks even
-        // though they carry no keep-prefix.
+        // The regenerated import library's descriptor globals
+        // (`__IMPORT_DESCRIPTOR_<dll>` etc.) carry no keep-prefix but must not be
+        // flagged as leaks.
         let archive = build_archive(&[
             ("run.o", coff_object_with_globals(&["mylib_run"])),
             (

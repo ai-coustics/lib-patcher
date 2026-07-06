@@ -12,11 +12,9 @@ pub(crate) struct WindowsLibTool {
     pub tool: String,
     pub machine_type: Option<String>,
     pub is_llvm: bool,
-    /// Whether the tool can (re)build DLL import libraries: generate one from a
-    /// `.def` and merge `.lib` inputs into the output. True for the lib.exe-style
-    /// librarians (`llvm-lib`, `lib.exe`); false for `llvm-ar`, whose ar-style
-    /// interface has no `/def:` and adds a `.lib` input as one opaque member
-    /// instead of merging it. See `regenerate_import_libs`.
+    /// Whether the tool can regenerate DLL import libraries: `/def:` plus merging
+    /// `.lib` inputs. True for lib.exe-style tools (`llvm-lib`, `lib.exe`); false
+    /// for `llvm-ar`, which has neither. See `regenerate_import_libs`.
     pub handles_import_members: bool,
 }
 
@@ -70,34 +68,24 @@ enum MemberKind {
     /// A regular COFF object: rename its symbols and archive it.
     Coff,
     /// A COFF short-import member: the `Foo`/`__imp_Foo` thunks for a DLL export.
-    /// Not a regular COFF object; it is decoded and the DLL's import library is
-    /// regenerated rather than renamed or re-archived. See [`is_import_member`].
+    /// Decoded so the DLL's import library can be regenerated. See
+    /// [`is_import_member`].
     ShortImport,
     /// An import-descriptor object: the `.idata$*` head/tail members
     /// (`__IMPORT_DESCRIPTOR_<dll>`, `__NULL_IMPORT_DESCRIPTOR`,
-    /// `<dll>_NULL_THUNK_DATA`) that pair with the short-import members to form a
-    /// DLL's import library. A regular COFF object by format, but it carries only
-    /// import plumbing, so it is dropped: the regenerated import library brings a
-    /// fresh one. See [`is_import_member`].
+    /// `<dll>_NULL_THUNK_DATA`) of a DLL import library. Dropped; the regenerated
+    /// library brings a fresh one. See [`is_import_member`].
     ImportDescriptor,
-    /// Anything else (LLVM bitcode): drop it. `llvm-objcopy` rejects these,
-    /// `lib.exe` can crash on them (`LNK1000`), and they duplicate the native
-    /// COFF members.
+    /// Anything else (LLVM bitcode): dropped. `llvm-objcopy` rejects these and
+    /// `lib.exe` can crash on them (`LNK1000`).
     Other,
 }
 
 impl MemberKind {
-    /// Whether the member is part of a DLL import library, which must be
-    /// regenerated rather than renamed or re-archived.
-    ///
-    /// Short-import and import-descriptor members together form the import
-    /// library rustc emits for a `raw-dylib` dependency. They cannot be carried
-    /// through: `lib.exe` crashes ingesting a loose short-import object
-    /// (`LNK1000`) and `llvm-lib` re-archives it into something `link.exe` builds
-    /// an empty import directory from, so the process faults at load with
-    /// `0xC0000005`. Instead the short-import members are decoded and each DLL's
-    /// import library is regenerated from a `.def`; the descriptor members are
-    /// dropped. See `regenerate_import_libs`.
+    /// Whether the member is part of a DLL import library (short-import or
+    /// descriptor), which is regenerated rather than renamed or re-archived: a
+    /// re-archived import member makes `link.exe` build an empty import directory,
+    /// faulting the consumer at load (`0xC0000005`). See `regenerate_import_libs`.
     fn is_import_member(self) -> bool {
         matches!(self, MemberKind::ShortImport | MemberKind::ImportDescriptor)
     }
@@ -116,10 +104,9 @@ fn classify_member(data: &[u8]) -> MemberKind {
     }
 }
 
-/// Whether a COFF object is an import-descriptor member: it has at least one
-/// section and every section is an import-directory section (`.idata$*`). Such
-/// objects carry only the DLL import plumbing (see [`MemberKind::is_import_member`]),
-/// never Rust code, so they are dropped and regenerated instead of renamed.
+/// Whether a COFF object is an import-descriptor member: at least one section,
+/// and every section an import-directory section (`.idata$*`). Such objects carry
+/// only DLL import plumbing, never Rust code.
 fn is_import_descriptor_object(data: &[u8]) -> bool {
     let Ok(file) = File::parse(data) else {
         return false;
@@ -147,14 +134,12 @@ struct ImportEntry {
     by_ordinal: bool,
 }
 
-/// Decodes a COFF short-import member (the `IMPORT_OBJECT` format) into its DLL,
-/// symbol, and import kind. Returns `None` if `data` is not a short-import member.
+/// Decodes a COFF short-import member (`IMPORT_OBJECT` format), or `None` if
+/// `data` is not one.
 ///
-/// Layout: a 20-byte `IMPORT_OBJECT_HEADER` (winnt.h) followed by two
-/// NUL-terminated strings, the imported symbol then the DLL name. The header's
-/// name-type field (bits 2..=4 of the u16 at offset 18) is `0`
-/// (`IMPORT_OBJECT_ORDINAL`) when the import binds by ordinal; the ordinal then
-/// lives in the u16 at offset 16.
+/// A 20-byte `IMPORT_OBJECT_HEADER` (winnt.h) then two NUL-terminated strings:
+/// the symbol, then the DLL. Name-type (bits 2..=4 of the u16 at offset 18) is
+/// `0` (`IMPORT_OBJECT_ORDINAL`) for ordinal imports; the ordinal is at offset 16.
 fn decode_short_import(data: &[u8]) -> Option<ImportEntry> {
     if data.len() < 20 || data[0..2] != [0, 0] || data[2..4] != [0xff, 0xff] {
         return None;
@@ -174,17 +159,14 @@ fn decode_short_import(data: &[u8]) -> Option<ImportEntry> {
     })
 }
 
-/// Regenerates a proper import library per DLL from `entries` and returns the
-/// paths of the generated `.lib` files (inside `temp_dir`).
+/// Regenerates an import library per DLL from `entries`, returning the generated
+/// `.lib` paths (inside `temp_dir`).
 ///
-/// The import members rustc bundles cannot be re-archived: `lib.exe` crashes
-/// ingesting a loose short-import object (`LNK1000`) and `llvm-lib` archives it
-/// into something `link.exe` builds an empty import directory from. So instead of
-/// carrying the originals through, decode them (see [`decode_short_import`]) and
-/// regenerate each DLL's import library from a `.def` via the librarian's `/def:`
-/// mode, the canonical, `link.exe`-consumable path. `lib_cmd` must be a
-/// lib.exe-style librarian (llvm-lib or lib.exe); `/def:` is not an `llvm-ar`
-/// flag, which is why the imports path requires `handles_import_members`.
+/// rustc's bundled import members cannot be re-archived (see
+/// [`MemberKind::is_import_member`]), so rebuild each DLL's import library from a
+/// `.def` via the librarian's `/def:` mode, the canonical `link.exe`-consumable
+/// path. `lib_cmd` must be lib.exe-style; `/def:` is not an `llvm-ar` flag, hence
+/// the `handles_import_members` gate.
 fn regenerate_import_libs(
     entries: &[ImportEntry],
     temp_dir: &Path,
@@ -251,11 +233,9 @@ fn regenerate_import_libs(
     libs
 }
 
-/// Whether `symbol` names DLL import plumbing that must never be renamed: the
-/// COMDAT head/tail symbols an import library shares across every copy for a
-/// given DLL. See [`MemberKind::is_import_member`]. The 32-bit toolchain adds a
-/// leading underscore, so match on a contained/suffix pattern rather than an
-/// exact prefix.
+/// Whether `symbol` is an import library's COMDAT head/tail symbol, which must
+/// keep its name. Matched by substring/suffix since the 32-bit toolchain prefixes
+/// an extra underscore.
 fn is_import_machinery(symbol: &str) -> bool {
     symbol.contains("__IMPORT_DESCRIPTOR_")
         || symbol.contains("__NULL_IMPORT_DESCRIPTOR")
@@ -422,10 +402,9 @@ pub(crate) fn patch_windows(
     eprintln!("Renaming symbols in objects...");
 
     let mut patched_files = Vec::new();
-    // Import members are never re-archived (that corrupts the import directory,
-    // see regenerate_import_libs). Short-import members are decoded here and the
-    // import libraries are regenerated from a .def below; descriptor members are
-    // dropped because the regenerated .libs carry fresh ones.
+    // Short-import members are decoded here; their import libraries are
+    // regenerated below (see regenerate_import_libs). Descriptor members are
+    // dropped, the regenerated .libs carry fresh ones.
     let mut import_entries: Vec<ImportEntry> = Vec::new();
 
     for (i, (obj_path, kind)) in obj_files.iter().enumerate() {
@@ -444,8 +423,7 @@ pub(crate) fn patch_windows(
                 }
                 continue;
             }
-            // Dropped: the import library is regenerated from the short-import
-            // members, which brings its own descriptor head/tail.
+            // Dropped; regenerated from the short-import members below.
             MemberKind::ImportDescriptor => continue,
             MemberKind::Coff => {}
         }
@@ -473,10 +451,9 @@ pub(crate) fn patch_windows(
         }
     }
 
-    // Step 4: Regenerate import libraries from the decoded short-import members.
-    // Skipped (with a warning) when the librarian cannot run `/def:` (llvm-ar) or
-    // none is available; consumers then resolve those imports from the system
-    // import libraries they link, as they did before imports were preserved.
+    // Step 4: Regenerate import libraries. Skipped (with a warning) when the
+    // librarian lacks `/def:` (llvm-ar); consumers then resolve those imports
+    // from the system import libraries they link.
     let mut import_libs = Vec::new();
     if !import_entries.is_empty() {
         if lib_cmd.handles_import_members {
@@ -509,12 +486,9 @@ pub(crate) fn patch_windows(
 
     let mut cmd = Command::new(&lib_cmd.tool);
     // Run from the temp dir and pass bare filenames so the archive stores
-    // relative member names. Passing absolute paths would embed the build
-    // location (and PID-based temp dir) into the library, making it
-    // non-reproducible and tied to where it was built. All patched_files and
-    // regenerated import libraries live in temp_dir, so their names are
-    // unambiguous. The import .libs are passed as inputs so the librarian merges
-    // their members (short-import + descriptor) into the output.
+    // relative member names. Absolute paths would embed the build location (and
+    // PID-based temp dir), making the library non-reproducible. The import .libs
+    // are passed as inputs so the librarian merges their members into the output.
     cmd.current_dir(&temp_dir);
 
     if lib_cmd.is_llvm {
@@ -626,10 +600,9 @@ fn msvc_machine_type(arch: &str) -> Option<&'static str> {
 
 /// Determines the appropriate library tool for Windows.
 ///
-/// `need_import_support` (the archive has COFF import members) prefers a
-/// lib.exe-style librarian that can regenerate import libraries, since `llvm-ar`
-/// cannot; see `handles_import_members`. An `llvm-ar`-only host still patches,
-/// dropping the imports (the caller warns).
+/// When `need_import_support` is set (the archive has import members), prefers a
+/// lib.exe-style librarian that can regenerate import libraries; an `llvm-ar`-only
+/// host still patches, dropping the imports. See `handles_import_members`.
 fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) -> WindowsLibTool {
     // Determine target architecture
     let target_arch_str = target_arch
@@ -711,10 +684,9 @@ fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) ->
             })
     };
 
-    // When the archive has imports, prefer a lib.exe-style librarian that can
-    // regenerate them (llvm-lib first, it is the proven path; then lib.exe);
-    // llvm-ar comes last since it cannot and would drop them. Without imports,
-    // lib.exe first, then the LLVM tools.
+    // With imports, prefer a lib.exe-style librarian that can regenerate them
+    // (llvm-lib, then lib.exe); llvm-ar last, since it would drop them. Without
+    // imports, lib.exe first.
     let probes: [&dyn Fn() -> Option<WindowsLibTool>; 3] = if need_import_support {
         [&llvm_lib, &msvc_lib, &llvm_ar]
     } else {
