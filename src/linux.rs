@@ -65,15 +65,9 @@ pub(crate) fn patch_linux(
                 && (*vis == "DEFAULT" || *vis == "HIDDEN")
                 && *ndx != "UND"
                 && !symbol_name.is_empty()
+                && !should_keep(symbol_name, keep_prefix)
             {
-                // Check if this symbol should be kept
-                let should_keep = symbol_name.starts_with(keep_prefix)
-                    || symbol_name.starts_with("DW.ref.")  // DWARF references
-                    || symbol_name.starts_with("_GLOBAL_OFFSET_TABLE_"); // Special linker symbol
-
-                if !should_keep {
-                    symbols_to_hide.push(symbol_name.to_string());
-                }
+                symbols_to_hide.push(symbol_name.to_string());
             }
         }
     }
@@ -133,6 +127,20 @@ pub(crate) fn patch_linux(
     fs::remove_file(&final_obj).ok();
 
     eprintln!("✓ Linux patching complete");
+}
+
+/// Whether a defined ELF global/weak symbol stays public after patching.
+///
+/// Strips a leading underscore before the prefix match, matching macOS, Windows,
+/// and the verifier (`matches_keep_prefix`): ELF names rarely carry one, but a
+/// symbol literally named `_<keep_prefix>...` would otherwise be hidden here yet
+/// demanded by the verifier, failing a patch that did the right thing.
+fn should_keep(symbol_name: &str, keep_prefix: &str) -> bool {
+    let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
+    symbol_name.starts_with(keep_prefix)
+        || unprefixed.starts_with(keep_prefix)
+        || symbol_name.starts_with("DW.ref.") // DWARF references
+        || symbol_name.starts_with("_GLOBAL_OFFSET_TABLE_") // Special linker symbol
 }
 
 /// Maps a target architecture to its GNU cross-toolchain triplet prefix
@@ -212,5 +220,20 @@ mod tests {
     #[test]
     fn unknown_arch_has_no_prefix_so_caller_uses_native_tools() {
         assert_eq!(linux_triplet_prefix("m68k"), None);
+    }
+
+    #[test]
+    fn keep_rule_strips_leading_underscore_like_the_verifier() {
+        // Bare API name is kept.
+        assert!(should_keep("mylib_add", "mylib_"));
+        // A leading-underscore spelling must also be kept, or the verifier (which
+        // strips the underscore) would demand a symbol this step just hid.
+        assert!(should_keep("_mylib_helper", "mylib_"));
+        // Compiler/linker internals stay public.
+        assert!(should_keep("DW.ref.rust_eh_personality", "mylib_"));
+        assert!(should_keep("_GLOBAL_OFFSET_TABLE_", "mylib_"));
+        // Unrelated globals are hidden.
+        assert!(!should_keep("_ZN4core3fmt3fooE", "mylib_"));
+        assert!(!should_keep("other_prefix_fn", "mylib_"));
     }
 }

@@ -166,7 +166,12 @@ fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
 /// Windows import-library members (e.g. `ProcessPrng` from `bcryptprimitives`)
 /// are exempt: their names must match the system DLL exports, so they cannot be
 /// renamed, and duplicate imports do not conflict the way defined symbols do.
-/// They are recognised by their paired `__imp_<name>` thunk.
+/// Two things are exempted: any `__imp_<name>` thunk itself, and any bare `name`
+/// for which an `__imp_<name>` exists anywhere in the archive. This is broader
+/// than a strict per-member pairing check, but list_symbols keeps no
+/// section/kind info to prove a real import pair, and on Windows every defined
+/// non-API global is already renamed, so a bare name surviving *and* colliding
+/// with an `__imp_` is not a shape we produce.
 fn find_leaked_symbols<'a>(symbols: &'a [String], keep_prefix: &str) -> Vec<&'a str> {
     let import_thunks: HashSet<&str> = symbols
         .iter()

@@ -111,32 +111,8 @@ pub(crate) fn patch_macos(
 
     let nm_stdout = String::from_utf8_lossy(&nm_out.stdout);
 
-    // Parse nm output to find symbols to hide
-    // Format: "0000000000000000 T _symbol_name" or "0000000000000000 D _symbol_name"
-    let mut symbols_to_hide = Vec::new();
-    for line in nm_stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let symbol_type = parts[1];
-            let mut symbol_name = parts[2];
-
-            // Only process defined symbols (T, D, S, B, etc. - uppercase means global)
-            if symbol_type.chars().next().unwrap_or('_').is_uppercase() {
-                // macOS symbols often have leading underscore
-                symbol_name = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
-
-                // Check if this symbol should be kept
-                let should_keep = symbol_name.starts_with(keep_prefix)
-                    || symbol_name.starts_with("DW.ref.")
-                    || symbol_name.starts_with("GCC_except_table");
-
-                if !should_keep {
-                    // Add back the underscore for the symbols file
-                    symbols_to_hide.push(format!("_{}", symbol_name));
-                }
-            }
-        }
-    }
+    // Parse nm output (`nm -g -U`, defined globals) to find symbols to hide.
+    let symbols_to_hide = symbols_to_hide_from_nm(&nm_stdout, keep_prefix);
 
     eprintln!("Found {} symbols to hide", symbols_to_hide.len());
 
@@ -152,21 +128,7 @@ pub(crate) fn patch_macos(
         .expect("Failed to run xcrun nm for all symbols");
 
     let all_symbols_stdout = String::from_utf8_lossy(&all_symbols_out.stdout);
-    let mut keep_symbols = Vec::new();
-
-    for line in all_symbols_stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let symbol_type = parts[1];
-            let symbol_name = parts[2];
-
-            if symbol_type.chars().next().unwrap_or('_').is_uppercase()
-                && !symbols_to_hide.contains(&symbol_name.to_string())
-            {
-                keep_symbols.push(symbol_name.to_string());
-            }
-        }
-    }
+    let keep_symbols = keep_symbols_from_nm(&all_symbols_stdout, &symbols_to_hide);
 
     if keep_symbols.is_empty() {
         eprintln!("Warning: No symbols will be kept global. This may not be intended.");
@@ -217,6 +179,60 @@ pub(crate) fn patch_macos(
     fs::remove_dir_all(&temp_obj_dir).ok();
 
     eprintln!("✓ macOS patching complete");
+}
+
+/// Parses `nm -g -U` output (defined globals) and returns the *raw* symbol names
+/// to hide: everything not matching `keep_prefix` or a compiler-internal
+/// exemption. nm lines look like `0000000000000000 T _symbol_name`.
+///
+/// The leading underscore is stripped only for the keep/hide decision; the name
+/// is stored exactly as nm reports it, so `keep_symbols_from_nm` can subtract it
+/// from the raw `nm -g` names. Re-adding an underscore would miss a global with
+/// no leading underscore (e.g. hand-written asm), leaving it exported and then
+/// failing verification.
+fn symbols_to_hide_from_nm(nm_stdout: &str, keep_prefix: &str) -> Vec<String> {
+    let mut symbols_to_hide = Vec::new();
+    for line in nm_stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let symbol_type = parts[1];
+            let symbol_name = parts[2];
+
+            // Only process defined symbols (T, D, S, B, etc. - uppercase means global)
+            if symbol_type.chars().next().unwrap_or('_').is_uppercase() {
+                let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
+                let should_keep = unprefixed.starts_with(keep_prefix)
+                    || unprefixed.starts_with("DW.ref.")
+                    || unprefixed.starts_with("GCC_except_table");
+
+                if !should_keep {
+                    symbols_to_hide.push(symbol_name.to_string());
+                }
+            }
+        }
+    }
+    symbols_to_hide
+}
+
+/// Parses `nm -g` output (all globals) and returns the exported allowlist: every
+/// global whose raw name is not in `symbols_to_hide`. Both sides use the raw
+/// nm spelling, so the subtraction is exact.
+fn keep_symbols_from_nm(nm_stdout: &str, symbols_to_hide: &[String]) -> Vec<String> {
+    let mut keep_symbols = Vec::new();
+    for line in nm_stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let symbol_type = parts[1];
+            let symbol_name = parts[2];
+
+            if symbol_type.chars().next().unwrap_or('_').is_uppercase()
+                && !symbols_to_hide.contains(&symbol_name.to_string())
+            {
+                keep_symbols.push(symbol_name.to_string());
+            }
+        }
+    }
+    keep_symbols
 }
 
 /// Returns the `ld -platform_version` arguments for an Apple target triplet.
@@ -276,6 +292,29 @@ fn apple_platform_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_underscore_global_is_hidden_and_not_re_exported() {
+        // A defined global with no leading underscore (e.g. hand-written asm) and
+        // one with the usual underscore. Only the API symbol may survive; the
+        // round-trip must hide the rest regardless of the underscore spelling.
+        let nm_g_u = "\
+0000000000000000 T foo\n\
+0000000000000010 T _bar\n\
+0000000000000020 T _mylib_add\n";
+        let hide = symbols_to_hide_from_nm(nm_g_u, "mylib_");
+        // Raw spellings preserved; the no-underscore `foo` is included as `foo`.
+        assert_eq!(hide, vec!["foo".to_string(), "_bar".to_string()]);
+
+        // Step 4 subtracts the hide set from the full global list. `foo` must not
+        // leak back into the exported allowlist.
+        let keep = keep_symbols_from_nm(nm_g_u, &hide);
+        assert_eq!(keep, vec!["_mylib_add".to_string()]);
+        assert!(
+            !keep.contains(&"foo".to_string()),
+            "a no-underscore global must not remain exported"
+        );
+    }
 
     #[test]
     fn macos_default_baseline_depends_on_arch() {
