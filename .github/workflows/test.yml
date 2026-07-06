@@ -7,6 +7,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  android:
+    name: Android NDK smoke test
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run Android patch/link smoke test
+        shell: bash
+        run: bash scripts/test-android.sh
+
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

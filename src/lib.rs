@@ -97,6 +97,14 @@ pub fn patch_lib(
             &final_arch,
             target_triplet,
         ),
+        "android" => patch_android(
+            static_lib,
+            out_dir,
+            lib_name,
+            keep_prefix,
+            final_lib,
+            &final_arch,
+        ),
         _ => patch_linux(
             static_lib,
             out_dir,
@@ -131,7 +139,9 @@ fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
         Some("visionos")
     } else if triplet.contains("apple") || triplet.contains("darwin") {
         Some("macos")
-    } else if triplet.contains("linux") || triplet.contains("android") {
+    } else if triplet.contains("android") {
+        Some("android")
+    } else if triplet.contains("linux") {
         Some("linux")
     } else {
         None
@@ -267,10 +277,12 @@ fn matches_keep_prefix(name: &str, keep_prefix: &str) -> bool {
 }
 
 // Platform-specific implementations
+mod android;
 mod linux;
 mod macos;
 mod windows;
 
+use android::patch_android;
 use linux::patch_linux;
 use macos::patch_macos;
 use windows::patch_windows;
@@ -654,7 +666,11 @@ mod tests {
         );
         assert_eq!(
             target_os_from_triplet("aarch64-linux-android"),
-            Some("linux")
+            Some("android")
+        );
+        assert_eq!(
+            target_os_from_triplet("armv7-linux-androideabi"),
+            Some("android")
         );
         // Apple-platform ordering matters: an iOS Catalyst target must resolve to
         // iOS, not fall through to the generic apple -> macos branch.

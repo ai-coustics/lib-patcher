@@ -97,6 +97,28 @@ cargo build
 ( cd tests/rust-consumer && cargo +beta run --release && cargo +stable run --release )
 ```
 
+#### Android
+
+Android patching is tested inside the published NDK image. From the repository
+root, run:
+
+```bash
+docker pull ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25
+
+docker run --rm \
+  -v "$PWD":/project \
+  -w /project \
+  ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25 \
+  bash scripts/test-android.sh
+```
+
+The script builds `tests/testlib` for all supported Android Rust targets
+(`aarch64-linux-android`, `armv7-linux-androideabi`, `i686-linux-android`, and
+`x86_64-linux-android`), patches each archive with `--triplet`, verifies no
+non-API globals remain public, and links the C consumer with the corresponding
+NDK clang wrapper. It does not run the Android executable; link success and the
+symbol verifier are the smoke-test signal.
+
 #### Windows
 
 Run from a Visual Studio Developer PowerShell so that `cl.exe` and `lib.exe`
@@ -139,6 +161,7 @@ Tests run automatically on:
 - Ubuntu (Linux x86_64)
 - macOS (`macos-latest`, Apple silicon)
 - Windows (x86_64)
+- Android NDK in `ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25`
 
 See `.github/workflows/test.yml` for the full CI configuration.
 
