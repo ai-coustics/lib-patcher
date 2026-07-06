@@ -1142,10 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn import_descriptor_members_are_preserved_not_renamed() {
+    fn import_descriptor_members_are_classified_and_not_renamed() {
         // An all-`.idata` COFF object is the import library's descriptor head/tail.
-        // It parses as regular COFF but must be preserved verbatim, not renamed,
-        // so its COMDATs fold with the consumer's real import library.
+        // It parses as regular COFF but is classified as an import member (dropped
+        // and regenerated), and its COMDAT symbols must never be renamed.
         let member = make_import_descriptor_object("__IMPORT_DESCRIPTOR_foo");
         assert!(
             File::parse(&*member).is_ok(),
