@@ -24,11 +24,20 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TESTLIB_PROFILE");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let lib_dir = PathBuf::from(&manifest_dir)
-        .join("..")
-        .join("testlib")
-        .join("target")
-        .join(&profile);
+
+    // Directory holding the testlib archive. Host builds (no --target) leave it
+    // at target/<profile>; cross builds (Android) put it at
+    // target/<triplet>/<profile>, so TESTLIB_LIB_DIR lets the Android test point
+    // directly at the right directory instead of guessing the triplet here.
+    let lib_dir = match env::var("TESTLIB_LIB_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => PathBuf::from(&manifest_dir)
+            .join("..")
+            .join("testlib")
+            .join("target")
+            .join(&profile),
+    };
+    println!("cargo:rerun-if-env-changed=TESTLIB_LIB_DIR");
 
     // Which archive to link. Defaults to the patched library; the negative test
     // overrides this to the unpatched "testlib" to show that an unpatched
