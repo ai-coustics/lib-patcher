@@ -150,9 +150,12 @@ fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
         || unprefixed.starts_with("DW.ref.")
         || unprefixed.starts_with("GLOBAL_OFFSET_TABLE_")
         || unprefixed.starts_with("GCC_except_table")
-        // COFF section/compiler symbols and MSVC-mangled names.
+        // `@`-prefixed COFF linker symbols (e.g. `@feat.00`) and MSVC-mangled
+        // names (`??...`); the Windows renamer leaves both unrenamed too. A
+        // `.`-prefixed symbol is NOT exempt: the renamer renames those (a
+        // `.weak.*` left global triggers LNK2005), so exempting them here would
+        // let an objcopy-failed member's unrenamed `.weak.*` leak past the guard.
         || name.starts_with('@')
-        || name.starts_with('.')
         || name.starts_with("??")
 }
 
@@ -604,10 +607,13 @@ mod tests {
         assert!(symbol_is_allowed_global("DW.ref.rust_eh_personality", KEEP));
         assert!(symbol_is_allowed_global("_GLOBAL_OFFSET_TABLE_", KEEP));
         assert!(symbol_is_allowed_global("GCC_except_table3", KEEP));
-        // COFF section/compiler symbols and MSVC-mangled names.
+        // `@`-prefixed COFF linker symbols and MSVC-mangled names stay global.
         assert!(symbol_is_allowed_global("@feat.00", KEEP));
-        assert!(symbol_is_allowed_global(".weak.foo", KEEP));
         assert!(symbol_is_allowed_global("??_C@_05foo@bar@", KEEP));
+        // But a `.weak.*` global is not exempt: the Windows renamer renames it
+        // (unrenamed it triggers LNK2005), so an objcopy-failed member that kept
+        // it must fail verification rather than leak it.
+        assert!(!symbol_is_allowed_global(".weak.foo", KEEP));
     }
 
     #[test]
