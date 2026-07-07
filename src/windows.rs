@@ -267,6 +267,13 @@ fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
     if symbol.starts_with("??") {
         return None;
     }
+    // COFF @-prefixed linker symbols (e.g. `@feat.00`) are consumed specially by
+    // the linker; renaming them drops the feature metadata they carry. The
+    // verifier classifies them as required linker symbols too (see
+    // symbol_is_allowed_global).
+    if symbol.starts_with('@') {
+        return None;
+    }
     // DLL import plumbing must keep its name so it folds with the consumer's real
     // import library; renaming it corrupts the import directory. See
     // MemberKind::is_import_member.
@@ -1192,6 +1199,14 @@ mod tests {
         ] {
             assert_eq!(rename_target(s, PREFIX), None, "{s} must not be renamed");
         }
+    }
+
+    #[test]
+    fn coff_linker_symbols_are_not_renamed() {
+        // @-prefixed COFF symbols (e.g. @feat.00) are consumed specially by the
+        // linker; renaming them drops the feature metadata they carry.
+        assert_eq!(rename_target("@feat.00", PREFIX), None);
+        assert_eq!(rename_target("@comp.id", PREFIX), None);
     }
 
     #[test]

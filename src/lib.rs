@@ -141,8 +141,8 @@ fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
 /// Returns true if a global symbol is allowed to remain public after patching.
 ///
 /// Besides the user's `keep_prefix`, a handful of compiler/linker-internal
-/// symbols are legitimately left global by the per-platform patchers (and on
-/// Windows they are renamed under `keep_prefix`, so they pass anyway).
+/// symbols are legitimately left global by the per-platform patchers, which skip
+/// renaming them (on Windows see `rename_target`).
 fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
     // macOS prefixes user symbols with an underscore in the symbol table.
     let unprefixed = name.strip_prefix('_').unwrap_or(name);
