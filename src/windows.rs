@@ -351,7 +351,8 @@ fn rename_coff_objects(
 ) -> Vec<PathBuf> {
     if !lib_cmd.is_llvm
         && !coff_objs.is_empty()
-        && let Some(patched) = batch_rename_coff(objcopy, renames_path, temp_dir, coff_objs, lib_cmd)
+        && let Some(patched) =
+            batch_rename_coff(objcopy, renames_path, temp_dir, coff_objs, lib_cmd)
     {
         return vec![patched];
     }
@@ -538,7 +539,8 @@ pub(crate) fn patch_windows(
     }
 
     eprintln!("Renaming symbols in {} COFF objects...", coff_objs.len());
-    let patched_files = rename_coff_objects(&objcopy, &renames_path, &temp_dir, &coff_objs, &lib_cmd);
+    let patched_files =
+        rename_coff_objects(&objcopy, &renames_path, &temp_dir, &coff_objs, &lib_cmd);
 
     // Step 4: Regenerate import libraries. A librarian that lacks `/def:`
     // (llvm-ar) cannot rebuild them, so we would have to drop every decoded
