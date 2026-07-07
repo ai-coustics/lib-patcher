@@ -458,9 +458,12 @@ pub(crate) fn patch_windows(
         }
     }
 
-    // Step 4: Regenerate import libraries. Skipped (with a warning) when the
-    // librarian lacks `/def:` (llvm-ar); consumers then resolve those imports
-    // from the system import libraries they link.
+    // Step 4: Regenerate import libraries. A librarian that lacks `/def:`
+    // (llvm-ar) cannot rebuild them, so we would have to drop every decoded
+    // import. That silently strips the archive's DLL imports and leaves
+    // consumers with unresolved externals, and verification won't catch it (it
+    // only checks defined API symbols). Fail loudly instead and require
+    // llvm-lib or lib.exe.
     let mut import_libs = Vec::new();
     if !import_entries.is_empty() {
         if lib_cmd.handles_import_members {
@@ -470,12 +473,14 @@ pub(crate) fn patch_windows(
             );
             import_libs = regenerate_import_libs(&import_entries, &temp_dir, &lib_cmd);
         } else {
-            eprintln!(
-                "Dropping {} DLL import(s): {} cannot regenerate import libraries \
-                 (needs llvm-lib or lib.exe). Consumers must link the system import \
-                 libraries themselves.",
+            panic!(
+                "{} cannot regenerate the {} DLL import(s) in this archive \
+                 (needs llvm-lib or lib.exe). Dropping them would leave consumers \
+                 with unresolved externals, so refusing to emit an incomplete \
+                 library. Install LLVM tools (llvm-lib) or the MSVC Build Tools \
+                 (lib.exe).",
+                lib_cmd.tool,
                 import_entries.len(),
-                lib_cmd.tool
             );
         }
     }
@@ -608,8 +613,10 @@ fn msvc_machine_type(arch: &str) -> Option<&'static str> {
 /// Determines the appropriate library tool for Windows.
 ///
 /// When `need_import_support` is set (the archive has import members), prefers a
-/// lib.exe-style librarian that can regenerate import libraries; an `llvm-ar`-only
-/// host still patches, dropping the imports. See `handles_import_members`.
+/// lib.exe-style librarian that can regenerate import libraries. `llvm-ar` is
+/// still probed last so hosts without lib.exe/llvm-lib get a clear diagnostic,
+/// but patching then aborts rather than dropping the imports (see the step 4
+/// panic in `patch_windows`). See `handles_import_members`.
 fn get_windows_lib_tool(target_arch: Option<&str>, need_import_support: bool) -> WindowsLibTool {
     // Determine target architecture
     let target_arch_str = target_arch
