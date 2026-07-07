@@ -27,7 +27,7 @@ pub(crate) fn patch_linux(
         .unwrap_or_else(|_| panic!("Failed to run {}", ld_cmd));
     assert!(status.success(), "{} -r failed", ld_cmd);
 
-    // Step 2: Get all GLOBAL and WEAK symbols (both DEFAULT and HIDDEN visibility)
+    // Step 2: Get all defined GLOBAL and WEAK symbols (any visibility)
     eprintln!("Extracting symbols to determine what to hide...");
     let readelf_output = Command::new("readelf")
         .args(["-sW"])
@@ -41,7 +41,7 @@ pub(crate) fn patch_linux(
 
     let symbols_output = String::from_utf8_lossy(&readelf_output.stdout);
 
-    // Parse readelf output to find GLOBAL and WEAK symbols (both DEFAULT and HIDDEN)
+    // Parse readelf output to find defined GLOBAL and WEAK symbols
     let mut symbols_to_hide = Vec::new();
     for line in symbols_output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -53,16 +53,17 @@ pub(crate) fn patch_linux(
 
         if parts.len() >= 8 {
             let bind = parts.get(4).unwrap_or(&"");
-            let vis = parts.get(5).unwrap_or(&"");
             let ndx = parts.get(6).unwrap_or(&"");
             let symbol_name = parts.get(7).unwrap_or(&"");
 
-            // Consider GLOBAL and WEAK symbols with any visibility (DEFAULT or HIDDEN)
-            // that are DEFINED (not UND). Weak symbols (e.g. compiler-builtins like
-            // __adddf3) are externally visible and conflict just like global ones, so
-            // they must be localized too. HIDDEN symbols also need localizing.
+            // Consider every DEFINED (not UND) GLOBAL or WEAK symbol, regardless of
+            // visibility. Weak symbols (e.g. compiler-builtins like __adddf3) are
+            // externally visible and conflict just like global ones. Visibility does
+            // not narrow this: `nm` (and thus the verifier) reports a defined
+            // GLOBAL/WEAK symbol as external whether its visibility is DEFAULT,
+            // HIDDEN, PROTECTED, or INTERNAL, so all of them must be localized or the
+            // verifier rejects the leftover as a leaked non-prefix global.
             if (*bind == "GLOBAL" || *bind == "WEAK")
-                && (*vis == "DEFAULT" || *vis == "HIDDEN")
                 && *ndx != "UND"
                 && !symbol_name.is_empty()
                 && !should_keep(symbol_name, keep_prefix)
