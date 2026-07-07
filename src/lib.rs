@@ -146,8 +146,7 @@ fn target_os_from_triplet(triplet: &str) -> Option<&'static str> {
 fn symbol_is_allowed_global(name: &str, keep_prefix: &str) -> bool {
     // macOS prefixes user symbols with an underscore in the symbol table.
     let unprefixed = name.strip_prefix('_').unwrap_or(name);
-    name.starts_with(keep_prefix)
-        || unprefixed.starts_with(keep_prefix)
+    matches_keep_prefix(name, keep_prefix)
         || unprefixed.starts_with("DW.ref.")
         || unprefixed.starts_with("GLOBAL_OFFSET_TABLE_")
         || unprefixed.starts_with("GCC_except_table")

@@ -139,9 +139,7 @@ pub(crate) fn patch_linux(
 /// symbol literally named `_<keep_prefix>...` would otherwise be hidden here yet
 /// demanded by the verifier, failing a patch that did the right thing.
 fn should_keep(symbol_name: &str, keep_prefix: &str) -> bool {
-    let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
-    symbol_name.starts_with(keep_prefix)
-        || unprefixed.starts_with(keep_prefix)
+    crate::matches_keep_prefix(symbol_name, keep_prefix)
         || symbol_name.starts_with("DW.ref.") // DWARF references
         || symbol_name.starts_with("_GLOBAL_OFFSET_TABLE_") // Special linker symbol
 }

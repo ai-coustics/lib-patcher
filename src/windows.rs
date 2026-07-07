@@ -7,7 +7,7 @@ use std::process::Command;
 
 use object::read::File;
 use object::read::coff::{ImportFile, ImportName, ImportType};
-use object::{Object as ObjectTrait, ObjectSection, ObjectSymbol};
+use object::{Object as ObjectTrait, ObjectSymbol};
 
 pub(crate) struct WindowsLibTool {
     pub tool: String,
@@ -107,20 +107,11 @@ fn classify_member(data: &[u8]) -> MemberKind {
 
 /// Whether a COFF object is an import-descriptor member: at least one section,
 /// and every section an import-directory section (`.idata$*`). Such objects carry
-/// only DLL import plumbing, never Rust code.
+/// only DLL import plumbing, never Rust code. Shares the classifier the verifier
+/// uses (`crate::is_import_descriptor_member`) so the drop decision here and the
+/// leak-exemption there cannot diverge.
 fn is_import_descriptor_object(data: &[u8]) -> bool {
-    let Ok(file) = File::parse(data) else {
-        return false;
-    };
-    let mut any = false;
-    for section in file.sections() {
-        any = true;
-        match section.name() {
-            Ok(name) if name.starts_with(".idata") => {}
-            _ => return false,
-        }
-    }
-    any
+    matches!(File::parse(data), Ok(file) if crate::is_import_descriptor_member(&file))
 }
 
 /// How a DLL import binds: by ordinal, or by the DLL-side export name (which may
@@ -273,11 +264,11 @@ fn is_import_machinery(symbol: &str) -> bool {
 /// cross-object asm routines and their `i686`-decorated `_`-prefixed spellings,
 /// which need no special-casing because the rename is purely name-based.
 fn rename_target(symbol: &str, keep_prefix: &str) -> Option<String> {
-    // 32-bit Windows decorates extern "C"/no_mangle exports with a leading
-    // underscore (e.g. `_testlib_add`), so test the stripped form too, as the
-    // verifier does. Otherwise public API would be renamed out of reach.
-    let unprefixed = symbol.strip_prefix('_').unwrap_or(symbol);
-    if symbol.starts_with(keep_prefix) || unprefixed.starts_with(keep_prefix) {
+    // Public API keeps its name. 32-bit Windows decorates extern "C"/no_mangle
+    // exports with a leading underscore (e.g. `_testlib_add`), so the shared
+    // matcher tests the stripped form too; otherwise public API would be renamed
+    // out of reach.
+    if crate::matches_keep_prefix(symbol, keep_prefix) {
         return None;
     }
     // MSVC-mangled names (??...) must be left alone; everything else (including

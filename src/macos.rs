@@ -198,7 +198,7 @@ fn classify_nm_globals(nm_stdout: &str, keep_prefix: &str) -> (Vec<String>, usiz
         }
 
         let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
-        let keep = unprefixed.starts_with(keep_prefix)
+        let keep = crate::matches_keep_prefix(symbol_name, keep_prefix)
             || unprefixed.starts_with("DW.ref.")
             || unprefixed.starts_with("GCC_except_table");
 
