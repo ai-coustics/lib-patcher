@@ -96,10 +96,15 @@ impl MemberKind {
 /// copy it through unchanged, or drop it. See [`MemberKind`].
 fn classify_member(data: &[u8]) -> MemberKind {
     match object::FileKind::parse(data) {
-        Ok(object::FileKind::Coff) if is_import_descriptor_object(data) => {
+        // CoffBig is a bigobj COFF (used once an object exceeds the normal COFF
+        // section limits): real code, renamable and archivable like a plain COFF,
+        // not a droppable member.
+        Ok(object::FileKind::Coff | object::FileKind::CoffBig)
+            if is_import_descriptor_object(data) =>
+        {
             MemberKind::ImportDescriptor
         }
-        Ok(object::FileKind::Coff) => MemberKind::Coff,
+        Ok(object::FileKind::Coff | object::FileKind::CoffBig) => MemberKind::Coff,
         Ok(object::FileKind::CoffImport) => MemberKind::ShortImport,
         _ => MemberKind::Other,
     }
