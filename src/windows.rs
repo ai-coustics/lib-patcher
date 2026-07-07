@@ -215,20 +215,28 @@ fn regenerate_import_libs(
         ));
 
         let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
-        if ok {
-            eprintln!(
-                "Regenerated import library for {} ({} symbols).",
+        if !ok {
+            // The short-import members for this DLL were already decoded and
+            // dropped from patched_files, so continuing would emit an archive
+            // missing these imports. Verification only checks defined API
+            // symbols, so it would report success while consumers hit
+            // unresolved externals. Fail loudly instead, matching step 4's
+            // refusal to drop imports.
+            panic!(
+                "{} failed to regenerate the import library for {} ({} symbols). \
+                 Its imports have already been dropped from the archive, so \
+                 refusing to emit an incomplete library.",
+                lib_cmd.tool,
                 dll,
                 seen.len()
             );
-            libs.push(lib_path);
-        } else {
-            eprintln!(
-                "Warning: failed to regenerate import library for {}; its imports \
-                 will be unresolved unless the consumer links {}'s import library.",
-                dll, dll
-            );
         }
+        eprintln!(
+            "Regenerated import library for {} ({} symbols).",
+            dll,
+            seen.len()
+        );
+        libs.push(lib_path);
     }
     libs
 }
