@@ -75,10 +75,12 @@ pub(crate) fn patch_linux(
 
     eprintln!("Found {} symbols to hide", symbols_to_hide.len());
 
-    // Step 3: Localize symbols using objcopy
-    fs::copy(&intermediate, &final_obj).expect("Failed to copy intermediate object");
-
-    if !symbols_to_hide.is_empty() {
+    // Step 3: Localize symbols using objcopy. objcopy reads `intermediate` and
+    // writes a fresh `final_obj`, so it only needs a standalone copy when there
+    // is nothing to localize (an unconditional copy would just be overwritten).
+    if symbols_to_hide.is_empty() {
+        fs::copy(&intermediate, &final_obj).expect("Failed to copy intermediate object");
+    } else {
         eprintln!("Localizing symbols...");
 
         // Pass the names in a file rather than one --localize-symbol arg each: a
