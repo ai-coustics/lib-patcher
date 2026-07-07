@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::File;
-use object::read::coff::{ImportFile, ImportName};
+use object::read::coff::{ImportFile, ImportName, ImportType};
 use object::{Object as ObjectTrait, ObjectSection, ObjectSymbol};
 
 pub(crate) struct WindowsLibTool {
@@ -138,6 +138,10 @@ struct ImportEntry {
     symbol: String,
     /// How it binds in the DLL.
     import: Import,
+    /// A data import (variable/constant) rather than a function. The `.def`
+    /// entry needs the `DATA` attribute so the regenerated import is not
+    /// rebuilt as a function, which would link incorrectly.
+    is_data: bool,
 }
 
 /// Decodes a COFF short-import member (`IMPORT_OBJECT` format), or `None` if
@@ -153,6 +157,9 @@ fn decode_short_import(data: &[u8]) -> Option<ImportEntry> {
         dll: String::from_utf8_lossy(file.dll()).into_owned(),
         symbol: String::from_utf8_lossy(file.symbol()).into_owned(),
         import,
+        // Code is a function; Data/Const are variables/constants that need the
+        // `.def` DATA attribute.
+        is_data: !matches!(file.import_type(), ImportType::Code),
     })
 }
 
@@ -189,11 +196,15 @@ fn regenerate_import_libs(
             }
             // `name` -> import by that name; `name=export` when the DLL exports it
             // under a different name (decorated/EXPORTAS); `name @ord NONAME` for
-            // an ordinal import.
+            // an ordinal import. A trailing ` DATA` marks a variable/constant so
+            // it is not rebuilt as a function import.
+            let data = if entry.is_data { " DATA" } else { "" };
             match &entry.import {
-                Import::Ordinal(ord) => writeln!(f, "  {} @{} NONAME", entry.symbol, ord),
-                Import::Name(name) if *name == entry.symbol => writeln!(f, "  {}", entry.symbol),
-                Import::Name(name) => writeln!(f, "  {}={}", entry.symbol, name),
+                Import::Ordinal(ord) => writeln!(f, "  {} @{} NONAME{}", entry.symbol, ord, data),
+                Import::Name(name) if *name == entry.symbol => {
+                    writeln!(f, "  {}{}", entry.symbol, data)
+                }
+                Import::Name(name) => writeln!(f, "  {}={}{}", entry.symbol, name, data),
             }
             .expect("Failed to write .def");
         }
@@ -1047,6 +1058,7 @@ mod tests {
         dll: &str,
         ordinal_or_hint: u16,
         name_type: u16,
+        import_type: u16,
         export: Option<&str>,
     ) -> Vec<u8> {
         let mut str_data = Vec::new();
@@ -1068,8 +1080,7 @@ mod tests {
         data.extend_from_slice(&(str_data.len() as u32).to_le_bytes()); // size_of_data
         data.extend_from_slice(&ordinal_or_hint.to_le_bytes());
         data.extend_from_slice(
-            &(object::pe::IMPORT_OBJECT_CODE | (name_type << object::pe::IMPORT_OBJECT_NAME_SHIFT))
-                .to_le_bytes(),
+            &(import_type | (name_type << object::pe::IMPORT_OBJECT_NAME_SHIFT)).to_le_bytes(),
         );
         data.extend_from_slice(&str_data);
         data
@@ -1077,7 +1088,14 @@ mod tests {
 
     /// A plain by-name short-import member (the common case).
     fn make_short_import_member(symbol: &str, dll: &str) -> Vec<u8> {
-        make_short_import(symbol, dll, 0, object::pe::IMPORT_OBJECT_NAME, None)
+        make_short_import(
+            symbol,
+            dll,
+            0,
+            object::pe::IMPORT_OBJECT_NAME,
+            object::pe::IMPORT_OBJECT_CODE,
+            None,
+        )
     }
 
     #[test]
@@ -1137,6 +1155,7 @@ mod tests {
             "some.dll",
             7,
             object::pe::IMPORT_OBJECT_ORDINAL,
+            object::pe::IMPORT_OBJECT_CODE,
             None,
         );
         let entry = decode_short_import(&ord).expect("decode ordinal import");
@@ -1148,11 +1167,30 @@ mod tests {
             "some.dll",
             0,
             object::pe::IMPORT_OBJECT_NAME_EXPORTAS,
+            object::pe::IMPORT_OBJECT_CODE,
             Some("RealExport"),
         );
         let entry = decode_short_import(&exportas).expect("decode EXPORTAS import");
         assert_eq!(entry.symbol, "LocalName");
         assert!(matches!(&entry.import, Import::Name(n) if n == "RealExport"));
+    }
+
+    #[test]
+    fn short_import_member_decodes_data_type() {
+        // A code import is a function; a data import (variable/constant) must be
+        // flagged so its .def entry carries the DATA attribute.
+        let code = make_short_import_member("SomeFn", "some.dll");
+        assert!(!decode_short_import(&code).unwrap().is_data);
+
+        let data = make_short_import(
+            "SomeVar",
+            "some.dll",
+            0,
+            object::pe::IMPORT_OBJECT_NAME,
+            object::pe::IMPORT_OBJECT_DATA,
+            None,
+        );
+        assert!(decode_short_import(&data).unwrap().is_data);
     }
 
     /// Builds a COFF object whose only section is an import-directory section
