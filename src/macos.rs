@@ -89,11 +89,14 @@ pub(crate) fn patch_macos(
         panic!("ld -r failed");
     }
 
-    // Step 3: Get all global defined symbols
+    // Step 3: Split the global symbols into the exported allowlist and the
+    // hide set in a single `nm -g` pass (defined globals not matching the
+    // allowlist are hidden; everything else, including undefined references,
+    // stays in the keep list for -exported_symbols_list).
     eprintln!("Extracting symbols to determine what to hide...");
     let nm_out = Command::new("xcrun")
         .arg("nm")
-        .args(["-g", "-U"]) // -g = global only, -U = defined only (no undefined)
+        .args(["-g"]) // -g = global only
         .arg(&intermediate)
         .output()
         .expect("Failed to run xcrun nm");
@@ -104,25 +107,12 @@ pub(crate) fn patch_macos(
     }
 
     let nm_stdout = String::from_utf8_lossy(&nm_out.stdout);
+    let (keep_symbols, hide_count) = classify_nm_globals(&nm_stdout, keep_prefix);
 
-    // Parse nm output (`nm -g -U`, defined globals) to find symbols to hide.
-    let symbols_to_hide = symbols_to_hide_from_nm(&nm_stdout, keep_prefix);
+    eprintln!("Found {} symbols to hide", hide_count);
 
-    eprintln!("Found {} symbols to hide", symbols_to_hide.len());
-
-    // Step 4: Create a symbols file with symbols to keep (for ld -exported_symbols_list)
+    // Step 4: Write the exported allowlist for ld -exported_symbols_list.
     let symbols_file = out_dir.join("keep_symbols.txt");
-
-    // Get symbols to keep by getting all symbols and removing the ones to hide
-    let all_symbols_out = Command::new("xcrun")
-        .arg("nm")
-        .args(["-g"])
-        .arg(&intermediate)
-        .output()
-        .expect("Failed to run xcrun nm for all symbols");
-
-    let all_symbols_stdout = String::from_utf8_lossy(&all_symbols_out.stdout);
-    let keep_symbols = keep_symbols_from_nm(&all_symbols_stdout, &symbols_to_hide);
 
     if keep_symbols.is_empty() {
         eprintln!("Warning: No symbols will be kept global. This may not be intended.");
@@ -175,58 +165,50 @@ pub(crate) fn patch_macos(
     eprintln!("✓ macOS patching complete");
 }
 
-/// Parses `nm -g -U` output (defined globals) and returns the *raw* symbol names
-/// to hide: everything not matching `keep_prefix` or a compiler-internal
-/// exemption. nm lines look like `0000000000000000 T _symbol_name`.
+/// Parses a single `nm -g` pass (all globals) and returns
+/// `(keep_symbols, hide_count)`.
 ///
-/// The leading underscore is stripped only for the keep/hide decision; the name
-/// is stored exactly as nm reports it, so `keep_symbols_from_nm` can subtract it
-/// from the raw `nm -g` names. Re-adding an underscore would miss a global with
-/// no leading underscore (e.g. hand-written asm), leaving it exported and then
-/// failing verification.
-fn symbols_to_hide_from_nm(nm_stdout: &str, keep_prefix: &str) -> Vec<String> {
-    let mut symbols_to_hide = Vec::new();
-    for line in nm_stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let symbol_type = parts[1];
-            let symbol_name = parts[2];
-
-            // Only process defined symbols (T, D, S, B, etc. - uppercase means global)
-            if symbol_type.chars().next().unwrap_or('_').is_uppercase() {
-                let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
-                let should_keep = unprefixed.starts_with(keep_prefix)
-                    || unprefixed.starts_with("DW.ref.")
-                    || unprefixed.starts_with("GCC_except_table");
-
-                if !should_keep {
-                    symbols_to_hide.push(symbol_name.to_string());
-                }
-            }
-        }
-    }
-    symbols_to_hide
-}
-
-/// Parses `nm -g` output (all globals) and returns the exported allowlist: every
-/// global whose raw name is not in `symbols_to_hide`. Both sides use the raw
-/// nm spelling, so the subtraction is exact.
-fn keep_symbols_from_nm(nm_stdout: &str, symbols_to_hide: &[String]) -> Vec<String> {
+/// `keep_symbols` is the exported allowlist for `ld -exported_symbols_list`:
+/// every defined global except the ones that fall outside `keep_prefix` and the
+/// compiler-internal exemptions. `hide_count` is how many defined globals are
+/// dropped, for the log line.
+///
+/// Defined nm lines look like `0000000000000000 T _symbol_name` (three columns);
+/// an undefined reference has no address and so only two columns, which are
+/// skipped here (they are not definitions, so `-exported_symbols_list` ignores
+/// them anyway). The leading underscore is stripped only for the keep/hide
+/// decision; names are compared as nm spells them, so a defined global with no
+/// leading underscore (e.g. hand-written asm) is still matched and cannot leak
+/// back into the allowlist.
+fn classify_nm_globals(nm_stdout: &str, keep_prefix: &str) -> (Vec<String>, usize) {
     let mut keep_symbols = Vec::new();
+    let mut hide_count = 0;
     for line in nm_stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let symbol_type = parts[1];
-            let symbol_name = parts[2];
+        if parts.len() < 3 {
+            continue;
+        }
+        let symbol_type = parts[1];
+        let symbol_name = parts[2];
 
-            if symbol_type.chars().next().unwrap_or('_').is_uppercase()
-                && !symbols_to_hide.contains(&symbol_name.to_string())
-            {
-                keep_symbols.push(symbol_name.to_string());
-            }
+        // -g reports only globals; a three-column line is a defined symbol
+        // (uppercase type letter: T, D, S, B, ...).
+        if !symbol_type.chars().next().unwrap_or('_').is_uppercase() {
+            continue;
+        }
+
+        let unprefixed = symbol_name.strip_prefix('_').unwrap_or(symbol_name);
+        let keep = unprefixed.starts_with(keep_prefix)
+            || unprefixed.starts_with("DW.ref.")
+            || unprefixed.starts_with("GCC_except_table");
+
+        if keep {
+            keep_symbols.push(symbol_name.to_string());
+        } else {
+            hide_count += 1;
         }
     }
-    keep_symbols
+    (keep_symbols, hide_count)
 }
 
 /// Returns the `ld -platform_version` arguments for an Apple target triplet.
@@ -290,19 +272,17 @@ mod tests {
     #[test]
     fn no_underscore_global_is_hidden_and_not_re_exported() {
         // A defined global with no leading underscore (e.g. hand-written asm) and
-        // one with the usual underscore. Only the API symbol may survive; the
-        // round-trip must hide the rest regardless of the underscore spelling.
-        let nm_g_u = "\
+        // one with the usual underscore, plus an undefined reference (two-column
+        // line, no address). Only the API symbol may be exported; the internal
+        // globals must be hidden regardless of underscore spelling, and the
+        // undefined reference is ignored (not a definition).
+        let nm_g = "\
 0000000000000000 T foo\n\
 0000000000000010 T _bar\n\
-0000000000000020 T _mylib_add\n";
-        let hide = symbols_to_hide_from_nm(nm_g_u, "mylib_");
-        // Raw spellings preserved; the no-underscore `foo` is included as `foo`.
-        assert_eq!(hide, vec!["foo".to_string(), "_bar".to_string()]);
-
-        // Step 4 subtracts the hide set from the full global list. `foo` must not
-        // leak back into the exported allowlist.
-        let keep = keep_symbols_from_nm(nm_g_u, &hide);
+0000000000000020 T _mylib_add\n\
+                 U _rust_eh_personality\n";
+        let (keep, hide_count) = classify_nm_globals(nm_g, "mylib_");
+        assert_eq!(hide_count, 2);
         assert_eq!(keep, vec!["_mylib_add".to_string()]);
         assert!(
             !keep.contains(&"foo".to_string()),
