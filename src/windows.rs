@@ -216,12 +216,11 @@ fn regenerate_import_libs(
 
         let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
         if !ok {
-            // The short-import members for this DLL were already decoded and
-            // dropped from patched_files, so continuing would emit an archive
-            // missing these imports. Verification only checks defined API
-            // symbols, so it would report success while consumers hit
-            // unresolved externals. Fail loudly instead, matching step 4's
-            // refusal to drop imports.
+            // This DLL's short-import members are already dropped from
+            // patched_files, so continuing emits an archive missing them.
+            // Verification only checks defined API symbols and would pass,
+            // leaving consumers with unresolved externals. Fail loudly, like
+            // step 4.
             panic!(
                 "{} failed to regenerate the import library for {} ({} symbols). \
                  Its imports have already been dropped from the archive, so \
