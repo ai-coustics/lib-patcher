@@ -11,3 +11,10 @@ crate-type = ["staticlib"]
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# release-lto folds the std runtime symbols into the crate's own object instead
+# of leaving them in separate archive members; the tests build both ways because
+# it changes whether an unpatched archive collides (see tests/README.md).
+[profile.release-lto]
+inherits = "release"
+lto = true

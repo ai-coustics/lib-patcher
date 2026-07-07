@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -18,80 +17,154 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
+      # The consumer is built with both toolchains (see tests/README.md). Install
+      # stable last so it stays the default for the tool build, unit tests, and
+      # testlib (which pins stable).
       - name: Install Rust beta
         uses: dtolnay/rust-toolchain@beta
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # testlib and the consumer are separate crates with their own target
+          # dirs; list them so their deps are cached too.
+          workspaces: |
+            .
+            tests/testlib
+            tests/rust-consumer
+
       - name: Build lib-patcher CLI
-        run: cargo build --release
+        # Debug on purpose: keeps overflow and debug_assert checks on while it
+        # patches a real library (see tests/README.md).
+        run: cargo build
 
-      - name: Build testlib static library (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Run unit tests
+        run: cargo test
+
+      # release (std in separate archive members) and release-lto (std folded
+      # into the crate object); the consumer is tested against both, see
+      # tests/README.md.
+      - name: Build testlib static library (both build styles)
+        working-directory: tests/testlib
         run: |
-          cd tests/testlib
-          cargo +stable build --release
-        shell: bash
+          cargo build --release
+          cargo build --profile release-lto
 
-      - name: Build testlib static library (Windows)
+      # Windows only: point the COFF object-parsing regression test at the real
+      # library just built. The earlier unit-test step skips it (env var unset).
+      - name: Verify object parses the real COFF archive (Windows)
         if: runner.os == 'Windows'
-        run: |
-          cd tests/testlib
-          cargo +stable build --release
-        shell: pwsh
+        env:
+          LIB_PATCHER_REAL_COFF_ARCHIVE: tests/testlib/target/release/testlib.lib
+        run: cargo test parses_real_windows_archive_when_provided
 
-      - name: Patch testlib (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          ./target/release/lib-patcher \
-            --input tests/testlib/target/release/libtestlib.a \
-            --output tests/testlib/target/release/libtestlib_patched.a
+      - name: Patch testlib
         shell: bash
-
-      - name: Patch testlib (Windows)
-        if: runner.os == 'Windows'
         run: |
-          .\target\release\lib-patcher.exe `
-            --input tests\testlib\target\release\testlib.lib `
-            --output tests\testlib\target\release\testlib_patched.lib
-        shell: pwsh
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            input=testlib.lib
+            output=testlib_patched.lib
+          else
+            input=libtestlib.a
+            output=libtestlib_patched.a
+          fi
+          for p in release release-lto; do
+            ./target/debug/lib-patcher \
+              --input tests/testlib/target/$p/$input \
+              --output tests/testlib/target/$p/$output \
+              --keep-prefix testlib_
+          done
 
       - name: Build and run C test (Linux/macOS)
         if: runner.os != 'Windows'
+        working-directory: tests/c-consumer
         run: |
-          cd tests/c-consumer
           make
           ./testlib-test
         shell: bash
 
       - name: Build and run C test (Windows)
         if: runner.os == 'Windows'
+        working-directory: tests/c-consumer
         run: |
-          cd tests\c-consumer
           lib /def:bcryptprimitives.def /out:bcryptprimitives.lib /machine:x64
           cl /Fe:testlib-test.exe main.c ..\testlib\target\release\testlib_patched.lib ws2_32.lib advapi32.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib bcryptprimitives.lib
           .\testlib-test.exe
         shell: cmd
 
-      - name: Build and run Rust test (different version) (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          cd tests/rust-consumer
-          cargo +beta build --release
-          cargo +beta run --release
+      # Full consumer matrix: {release, release-lto} x {stable, beta}, each
+      # against the patched and the unpatched archive. TESTLIB_PROFILE selects
+      # the build, TESTLIB_LINK_LIB the archive. Patched must link and run in
+      # every cell; unpatched must match the table in tests/README.md, which
+      # explains why each cell links or fails. A regressed cell means the
+      # linker's archive-member selection or rustc's LTO packaging changed.
+      - name: Rust consumer matrix (build styles x toolchains, patched + unpatched)
+        working-directory: tests/rust-consumer
         shell: bash
-
-      - name: Build and run Rust test (different version) (Windows)
-        if: runner.os == 'Windows'
         run: |
-          cd tests/rust-consumer
-          cargo +beta build --release
-          cargo +beta run --release
-        shell: pwsh
+          set -u
+          # On the Windows runner, Git-bash's /usr/bin/link.exe shadows MSVC's on
+          # PATH; drop it so rustc uses the MSVC linker (from msvc-dev-cmd).
+          # Untouched elsewhere: Linux/macOS do not use it.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            rm -f /usr/bin/link.exe /usr/bin/link
+          fi
+
+          fail=0
+          # report EXPECTED ACTUAL CASE BUILD TOOLCHAIN: print one aligned line -
+          # the matrix conditions, then a check/cross, then the outcome. Matches
+          # get "(as expected)"; mismatches leave it off (more detail follows).
+          report() {
+            local expected=$1 actual=$2 mark verb suffix=""
+            if [ "$expected" = "$actual" ]; then mark="✓"; suffix=" (as expected)"; else mark="✗"; fail=1; fi
+            [ "$actual" = link ] && verb="linked" || verb="failed to link"
+            printf '%-9s %-8s %-7s  %s %s%s\n' "$3" "$4" "$5" "$mark" "$verb" "$suffix"
+          }
+
+          for profile in release release-lto; do
+            build=$([ "$profile" = release ] && echo non-lto || echo lto)
+            for tc in beta stable; do
+              # Patched: always expected to link (and run).
+              if TESTLIB_PROFILE=$profile cargo +$tc run --release >out.log 2>&1; then
+                report link link patched "$build" "+$tc"
+              else
+                report link fail patched "$build" "+$tc"
+                cat out.log
+              fi
+
+              # Unpatched: expected to link only for separate std members with a
+              # matching toolchain, or anywhere on macOS (ld64 first-wins).
+              exp=fail
+              if [ "$RUNNER_OS" = "macOS" ] || { [ "$profile" = release ] && [ "$tc" = stable ]; }; then
+                exp=link
+              fi
+              if TESTLIB_PROFILE=$profile TESTLIB_LINK_LIB=testlib cargo +$tc build --release >out.log 2>&1; then
+                report "$exp" link unpatched "$build" "+$tc"
+              else
+                report "$exp" fail unpatched "$build" "+$tc"
+                # A failure must be a duplicate-symbol failure, not something else.
+                if ! grep -Eiq "duplicate symbol|multiple definition|LNK2005|LNK1169" out.log; then
+                  echo "    (but the failure was not a duplicate-symbol error:)"
+                  cat out.log
+                  fail=1
+                fi
+              fi
+            done
+          done
+
+          echo
+          if [ "$fail" = 0 ]; then
+            echo "all matrix expectations met"
+          else
+            echo "::error::one or more matrix expectations were not met (see ✗ above)"
+          fi
+          exit $fail

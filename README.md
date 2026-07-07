@@ -1,30 +1,32 @@
 # lib-patcher
 
-Symbol filtering for cross-platform static libraries to prevent linking conflicts.
+Cross-platform symbol filtering for Rust static libraries.
 
-This library hides internal Rust standard library symbols from static libraries to prevent symbol conflicts when linking multiple Rust static libraries together. This was developed to address the requirement of shipping a compiled C library that gets used from Rust again, where symbol conflicts would otherwise occur.
+Hides all symbols except those with a specified prefix to prevent linking conflicts when linking multiple Rust static libraries together. This is useful when shipping a precompiled Rust static library that consumers link into their own Rust projects, where symbol conflicts would otherwise occur.
 
-## Inspiration and Background
+## The Problem
 
-This library was inspired by:
+When you link a Rust static library into another Rust project, symbol conflicts occur if both use the same Rust stdlib version or dependencies:
 
-- [staticlib-fucker](https://github.com/zeozeozeo/staticlib-fucker) - A Windows-only tool for addressing this problem
-- [Alan Wu's blog post on symbol hygiene](https://alanwu.space/post/symbol-hygiene/)
-- The ongoing [Rust issue #104707](https://github.com/rust-lang/rust/issues/104707) discussing symbol visibility in static libraries
+```
+error: duplicate symbol: rust_eh_personality
+error: duplicate symbol: serde_json::ser::indent
+...
+```
 
-## What This Does
+## The Solution
 
-This library hides specific symbols in static libraries to prevent conflicts:
+**lib-patcher** hides all internal symbols and only exposes your public API:
 
-- **Keeps**: All symbols EXCEPT those in the blocklist
-- **Hides**: ONLY specific symbols (e.g., `rust_eh_personality`, `__rust_alloc`)
-- **Use case**: Third-party libraries where you need to hide conflicting symbols
+- ✅ **Keeps**: Only symbols with your specified prefix (e.g., `mylib_*`)
+- ✅ **Hides**: Everything else (Rust stdlib, dependencies, internal symbols)
+- ✅ **Works**: Even when consumer uses the same Rust version
 
 ## How to Use
 
 ### As a CLI Tool (Post-Build)
 
-#### Install CLI
+#### Install
 
 ```sh
 cargo install --git ssh://git@github.com/ai-coustics/lib-patcher.git lib-patcher
@@ -33,119 +35,65 @@ cargo install --git ssh://git@github.com/ai-coustics/lib-patcher.git lib-patcher
 #### Basic Usage
 
 ```bash
-# Use default blocklist (hides common Rust stdlib symbols)
+# Patch library to only expose symbols starting with "mylib_"
 lib-patcher \
-  --input vendor/libthirdparty.a \
-  --output vendor/libthirdparty_patched.a
-
-# Or use custom blocklist
-lib-patcher \
-  --input vendor/lib2.a \
-  --output vendor/lib2_patched.a \
-  --symbols "rust_eh_personality,my_conflict,__rust_alloc"
-
-# Filter by prefix (hides all symbols starting with the given prefixes)
-lib-patcher \
-  --input vendor/lib3.a \
-  --output vendor/lib3_patched.a \
-  --filter-prefix "_ZN,__rust,rust_"
-
-# Combine default + prefix filtering
-lib-patcher \
-  --input vendor/lib4.a \
-  --output vendor/lib4_patched.a \
-  --default \
-  --filter-prefix "_ZN100,_ZN101"
+  --input libmylib.a \
+  --output libmylib_patched.a \
+  --keep-prefix "mylib_"
 ```
 
-**Options:**
+**CLI Options:**
 - `--input, -i`: Path to input static library (required)
-- `--output, -o`: Path to output patched library (required)
-- `--symbols, -s`: Comma-separated list of symbols to hide (optional, defaults to stdlib symbols)
-- `--filter-prefix, -f`: Comma-separated list of prefixes; hides all symbols starting with these prefixes
-- `--default, -d`: Include default blocklist in addition to custom symbols/prefixes
+- `--output, -o`: Path to output patched library (required when patching)
+- `--keep-prefix, -k`: Prefix for symbols to keep public (required when patching)
+- `--triplet, -T`: Full Rust target triplet (e.g. `x86_64-pc-windows-gnullvm`, `aarch64-apple-ios`). Needed when cross-compiling: it selects the platform code path and the correct Apple platform version. Without it the host OS is assumed.
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
 - `--temp-dir, -t`: Directory for temporary files (optional)
 - `--list, -l`: List all public symbols instead of patching
 
-**Default blocklist includes:**
-- `rust_eh_personality`, `__rust_alloc`, `__rust_dealloc`, `__rust_realloc`
-- `__rust_alloc_zeroed`, `__rust_alloc_error_handler`, `__rust_no_alloc_shim_is_unstable`
+`--keep-prefix` is required when patching. Invoking the patcher without it is
+an error.
+
+#### Cross-compiling
+
+When patching a library built for a target other than the host, pass the
+triplet so the right platform tooling is used:
+
+```bash
+lib-patcher \
+  --input target/x86_64-pc-windows-gnullvm/release/libmylib.a \
+  --output libmylib_patched.a \
+  --keep-prefix "mylib_" \
+  --triplet x86_64-pc-windows-gnullvm
+```
 
 #### List Symbols
 
 ```bash
-# List all public symbols in a library
+# See what symbols are currently public
 lib-patcher --input libmylib.a --list
 ```
 
 ### As a Rust Library (build.rs)
 
-You can also use it programmatically in your `build.rs`:
+Use it programmatically in your `build.rs`:
 
 ```rust
-use lib_patcher::{patch_lib, default_symbol_blocklist, filter_symbols_by_prefix};
+use lib_patcher::patch_lib;
 use std::env;
 use std::path::Path;
 
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
 
-    // Use default blocklist (hides common Rust stdlib symbols)
     patch_lib(
         Path::new("vendor/libthirdparty.a"),
         Path::new(&out_dir),
         "thirdparty",
-        &default_symbol_blocklist(),
+        "thirdparty_",  // Keep only symbols starting with "thirdparty_"
         Path::new("libthirdparty_patched.a"),
-        None,
-    );
-
-    // Or use a custom blocklist
-    let symbols = vec![
-        "rust_eh_personality".to_string(),
-        "my_conflict".to_string(),
-    ];
-    patch_lib(
-        Path::new("vendor/lib2.a"),
-        Path::new(&out_dir),
-        "lib2",
-        &symbols,
-        Path::new("lib2_patched.a"),
-        None,
-    );
-
-    // Filter by prefix (hides all symbols starting with the given prefixes)
-    let prefixes = vec!["_ZN".to_string(), "__rust".to_string()];
-    let filtered_symbols = filter_symbols_by_prefix(
-        Path::new("vendor/lib3.a"),
-        &prefixes
-    ).unwrap();
-    
-    patch_lib(
-        Path::new("vendor/lib3.a"),
-        Path::new(&out_dir),
-        "lib3",
-        &filtered_symbols,
-        Path::new("lib3_patched.a"),
-        None,
-    );
-
-    // Combine default + prefix filtering
-    let mut combined = default_symbol_blocklist();
-    let prefix_filtered = filter_symbols_by_prefix(
-        Path::new("vendor/lib4.a"),
-        &vec!["_ZN100".to_string()]
-    ).unwrap();
-    combined.extend(prefix_filtered);
-    
-    patch_lib(
-        Path::new("vendor/lib4.a"),
-        Path::new(&out_dir),
-        "lib4",
-        &combined,
-        Path::new("lib4_patched.a"),
-        None,
+        None,  // Auto-detect architecture
+        None,  // Triplet: None uses the host OS (set when cross-compiling)
     );
 
     println!("cargo:rustc-link-search=native={}", out_dir);
@@ -155,67 +103,93 @@ fn main() {
 
 ## Platform-Specific Tools Required
 
-- **Windows**: `lib.exe` (MSVC toolchain) or `llvm-lib`
+- **Windows**: `llvm-objcopy` or `rust-objcopy` to rename symbols (from an LLVM
+  install, or `rustup component add llvm-tools`), **plus** an archiver: `lib.exe`
+  (MSVC toolchain), `llvm-lib`, or `llvm-ar`. MSVC's `lib.exe` alone is not
+  sufficient: it archives but cannot rename symbols.
 - **macOS**: `ld`, `nm`, `ar` (Xcode Command Line Tools)
-- **Linux**: `ld`, `objcopy`, `ar` or `llvm-ar`
+- **Linux**: `ld`, `objcopy`, `readelf`, `ar` or `llvm-ar`
 
-## Common Issues
+## How It Works
 
-### Multiple definition errors still occur
+### Platform-Specific Implementation
 
-→ Add the conflicting symbol to your blocklist. Use `lib-patcher --input libmylib.a --list` to identify which symbols are conflicting.
+#### Linux
+1. Links all objects with `ld -r` into a single intermediate object
+2. Uses `readelf` to extract all GLOBAL and WEAK symbols (both DEFAULT and HIDDEN visibility)
+3. Filters to find symbols that don't match the prefix
+4. Uses `objcopy --localize-symbols` (names passed in a file) to make them local/private
+5. Creates final archive with `ar`
 
-### All symbols were removed
+#### macOS
+1. Extracts all object files from the archive
+2. Links with `ld -r` into a single intermediate object
+3. Uses `nm` to get all global defined symbols
+4. Creates an `-exported_symbols_list` with symbols to keep
+5. Uses `ld -r -exported_symbols_list` to filter
+6. Creates final archive with `ar`
 
-→ You may have accidentally hidden all symbols. Review your blocklist.
+#### Windows
+1. Parses the COFF archive and extracts each object file
+2. Scans every object for defined global symbols
+3. For each symbol that does **not** start with the keep-prefix, generates a rename to `<keep-prefix><symbol>` (MSVC-mangled `??`-symbols are left untouched)
+4. Applies the renames per object with `llvm-objcopy --redefine-syms`, so the renamed symbols no longer collide with the consumer's identically-named symbols
+5. Re-creates the library with `lib.exe` / `llvm-lib` / `llvm-ar`
 
-### Works without patch, breaks with it
+### What Gets Hidden
 
-→ A symbol you're using was added to the blocklist by mistake. Check which symbols are being hidden.
+Everything except your public API (symbols starting with the keep-prefix) is taken
+out of the way:
+
+- On **Linux/macOS** non-matching symbols are localized so they are no longer
+  externally visible.
+- On **Windows** non-matching symbols are renamed under the keep-prefix instead of
+  localized (COFF makes localizing weak/COMDAT symbols unsafe), which removes the
+  collision just the same.
+
+The following are always left alone because they are needed for linking:
+- Symbols starting with your specified prefix (your public API)
+- DWARF debug symbols (`DW.ref.*`, `GCC_except_table`)
+- Special linker symbols (`_GLOBAL_OFFSET_TABLE_`, `@`-prefixed symbols)
+
+### When Patching Is Needed
+
+Whether an unpatched library actually breaks the link depends on the platform:
+
+- **Linux and Windows**: the link fails with duplicate-symbol errors whenever the
+  consumer must pull an object that redefines Rust std symbols. That happens with a
+  different toolchain, or with an LTO-built library even on the same toolchain.
+- **macOS**: `ld64` resolves archive duplicates first-definition-wins, so an
+  unpatched library links regardless. Patching is still worth doing: it keeps the
+  library's internal and dependency symbols out of the consumer's symbol table, so
+  nothing can bind to them by accident and the exported surface stays limited to
+  your API; the result no longer depends on the linker happening to resolve
+  duplicates in your favor; and you ship the same patched artifact through one build
+  step on every platform.
 
 ## Testing
 
-This repository includes comprehensive integration tests in the `tests/` directory that verify the tool works correctly across all platforms.
+Integration tests build a Rust static library with real dependencies (rand,
+serde, serde_json), patch it to keep only its handful of public API functions
+while hiding the thousands of stdlib and dependency symbols, then link it from
+both C and Rust consumers on Linux, macOS, and Windows. The Rust consumer pulls
+in its own copies of the same dependencies, so it links cleanly only because
+patching hid the library's copies.
 
-### Running Tests
+To prove those tests are load-bearing, the same consumer also links the
+*unpatched* archive and asserts it fails with duplicate-symbol errors where it
+must.
 
-```bash
-# Run the full test suite
-cd tests
-./run_tests.sh
-```
+See [`tests/README.md`](tests/README.md) for the test layout, the full
+patched/unpatched link matrix, and step-by-step build instructions per platform,
+and [`.github/workflows/test.yml`](.github/workflows/test.yml) for the CI runs.
 
-Or run individual steps:
+## Inspiration
 
-```bash
-# 1. Build the CLI tool
-cargo build --release
-
-# 2. Build test library (with rand, serde, lots of std symbols)
-cd tests/testlib && cargo build --release
-
-# 3. Patch it
-./target/release/lib-patcher \
-  --input tests/testlib/target/release/libtestlib.a \
-  --output tests/testlib/target/release/libtestlib_patched.a
-
-# 4. Test from C
-cd tests/c-consumer && make && ./testlib-test
-
-# 5. Test from Rust (different version - this is the key test!)
-cd tests/rust-consumer && cargo +beta run --release
-```
-
-### What Gets Tested
-
-The test suite verifies:
-- **Real dependencies**: Uses rand, serde, serde_json to generate realistic symbol counts
-- **Symbol hiding**: Hides Rust stdlib symbols while keeping library functions
-- **C interop**: C code can successfully link and call the patched library
-- **Cross-version Rust**: A Rust program with a **different stdlib version** can link without conflicts
-- **Platform coverage**: CI runs on Linux, macOS, and Windows
-
-The rust-consumer test is the critical one - it's built with Rust beta and uses rand 0.9, while testlib is built with Rust stable and uses rand 0.8. Without patching, this would fail with symbol conflicts.
+This library was inspired by:
+- [staticlib-fucker](https://github.com/zeozeozeo/staticlib-fucker) - Windows-only tool for this problem
+- [Alan Wu's blog post on symbol hygiene](https://alanwu.space/post/symbol-hygiene/)
+- The ongoing [Rust issue #104707](https://github.com/rust-lang/rust/issues/104707) discussing symbol visibility
 
 ## License
 
