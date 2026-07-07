@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::File;
+use object::read::coff::{ImportFile, ImportName};
 use object::{Object as ObjectTrait, ObjectSection, ObjectSymbol};
 
 pub(crate) struct WindowsLibTool {
@@ -122,40 +123,36 @@ fn is_import_descriptor_object(data: &[u8]) -> bool {
     any
 }
 
+/// How a DLL import binds: by ordinal, or by the DLL-side export name (which may
+/// differ from the local `symbol` for a decorated or `EXPORTAS` import).
+enum Import {
+    Ordinal(u16),
+    Name(String),
+}
+
 /// A single DLL import decoded from a COFF short-import member.
 struct ImportEntry {
     /// The DLL the symbol is imported from (e.g. `bcryptprimitives.dll`).
     dll: String,
-    /// The imported symbol name (e.g. `ProcessPrng`).
+    /// The local symbol name the consumer references (drives `__imp_<symbol>`).
     symbol: String,
-    /// The ordinal, meaningful only when `by_ordinal` is set.
-    ordinal: u16,
-    /// Whether the import binds by ordinal rather than by name.
-    by_ordinal: bool,
+    /// How it binds in the DLL.
+    import: Import,
 }
 
 /// Decodes a COFF short-import member (`IMPORT_OBJECT` format), or `None` if
-/// `data` is not one.
-///
-/// A 20-byte `IMPORT_OBJECT_HEADER` (winnt.h) then two NUL-terminated strings:
-/// the symbol, then the DLL. Name-type (bits 2..=4 of the u16 at offset 18) is
-/// `0` (`IMPORT_OBJECT_ORDINAL`) for ordinal imports; the ordinal is at offset 16.
+/// `data` is not one. `object`'s `ImportFile` resolves the DLL-side name across
+/// every name type (plain, undecorated, `EXPORTAS`) and the ordinal case.
 fn decode_short_import(data: &[u8]) -> Option<ImportEntry> {
-    if data.len() < 20 || data[0..2] != [0, 0] || data[2..4] != [0xff, 0xff] {
-        return None;
-    }
-    let ordinal = u16::from_le_bytes([data[16], data[17]]);
-    let name_type = (u16::from_le_bytes([data[18], data[19]]) >> 2) & 0x7;
-    let by_ordinal = name_type == 0;
-
-    let mut strings = data[20..].split(|&b| b == 0);
-    let symbol = strings.next().filter(|s| !s.is_empty())?;
-    let dll = strings.next().filter(|s| !s.is_empty())?;
+    let file = ImportFile::parse(data).ok()?;
+    let import = match file.import() {
+        ImportName::Ordinal(n) => Import::Ordinal(n),
+        ImportName::Name(n) => Import::Name(String::from_utf8_lossy(n).into_owned()),
+    };
     Some(ImportEntry {
-        dll: String::from_utf8_lossy(dll).into_owned(),
-        symbol: String::from_utf8_lossy(symbol).into_owned(),
-        ordinal,
-        by_ordinal,
+        dll: String::from_utf8_lossy(file.dll()).into_owned(),
+        symbol: String::from_utf8_lossy(file.symbol()).into_owned(),
+        import,
     })
 }
 
@@ -190,10 +187,13 @@ fn regenerate_import_libs(
             if !seen.insert(entry.symbol.as_str()) {
                 continue;
             }
-            if entry.by_ordinal {
-                writeln!(f, "  {} @{} NONAME", entry.symbol, entry.ordinal)
-            } else {
-                writeln!(f, "  {}", entry.symbol)
+            // `name` -> import by that name; `name=export` when the DLL exports it
+            // under a different name (decorated/EXPORTAS); `name @ord NONAME` for
+            // an ordinal import.
+            match &entry.import {
+                Import::Ordinal(ord) => writeln!(f, "  {} @{} NONAME", entry.symbol, ord),
+                Import::Name(name) if *name == entry.symbol => writeln!(f, "  {}", entry.symbol),
+                Import::Name(name) => writeln!(f, "  {}={}", entry.symbol, name),
             }
             .expect("Failed to write .def");
         }
@@ -1018,30 +1018,45 @@ mod tests {
     }
 
     /// Hand-builds a minimal COFF short-import member (the `Foo`/`__imp_Foo`
-    /// shape `lib.exe` emits for a DLL import). `object::File::parse` rejects
-    /// these, so the old boolean classifier dropped them from the output.
-    fn make_short_import_member(symbol: &str, dll: &str) -> Vec<u8> {
-        let mut data = Vec::new();
-        // symbol\0 dll\0 string block that follows the 20-byte header.
+    /// shape `lib.exe` emits for a DLL import) with a given name type: a
+    /// `symbol\0 dll\0` string block, plus an `export\0` string for `EXPORTAS`.
+    /// `object::File::parse` rejects these, so they are classified separately.
+    fn make_short_import(
+        symbol: &str,
+        dll: &str,
+        ordinal_or_hint: u16,
+        name_type: u16,
+        export: Option<&str>,
+    ) -> Vec<u8> {
         let mut str_data = Vec::new();
         str_data.extend_from_slice(symbol.as_bytes());
         str_data.push(0);
         str_data.extend_from_slice(dll.as_bytes());
         str_data.push(0);
+        if let Some(export) = export {
+            str_data.extend_from_slice(export.as_bytes());
+            str_data.push(0);
+        }
 
+        let mut data = Vec::new();
         data.extend_from_slice(&0u16.to_le_bytes()); // sig1 = IMAGE_FILE_MACHINE_UNKNOWN
         data.extend_from_slice(&object::pe::IMPORT_OBJECT_HDR_SIG2.to_le_bytes()); // sig2
         data.extend_from_slice(&0u16.to_le_bytes()); // version
         data.extend_from_slice(&object::pe::IMAGE_FILE_MACHINE_AMD64.to_le_bytes()); // machine
         data.extend_from_slice(&0u32.to_le_bytes()); // time_date_stamp
         data.extend_from_slice(&(str_data.len() as u32).to_le_bytes()); // size_of_data
-        data.extend_from_slice(&0u16.to_le_bytes()); // ordinal_or_hint
-        // name_type: IMPORT_OBJECT_CODE | (IMPORT_OBJECT_NAME << shift)
-        let name_type = object::pe::IMPORT_OBJECT_CODE
-            | (object::pe::IMPORT_OBJECT_NAME << object::pe::IMPORT_OBJECT_NAME_SHIFT);
-        data.extend_from_slice(&name_type.to_le_bytes());
+        data.extend_from_slice(&ordinal_or_hint.to_le_bytes());
+        data.extend_from_slice(
+            &(object::pe::IMPORT_OBJECT_CODE | (name_type << object::pe::IMPORT_OBJECT_NAME_SHIFT))
+                .to_le_bytes(),
+        );
         data.extend_from_slice(&str_data);
         data
+    }
+
+    /// A plain by-name short-import member (the common case).
+    fn make_short_import_member(symbol: &str, dll: &str) -> Vec<u8> {
+        make_short_import(symbol, dll, 0, object::pe::IMPORT_OBJECT_NAME, None)
     }
 
     #[test]
@@ -1079,18 +1094,44 @@ mod tests {
     #[test]
     fn short_import_member_decodes_to_dll_and_symbol() {
         // The regeneration path decodes each short-import member back into its
-        // (dll, symbol); a by-name import must report by_ordinal = false.
+        // (dll, symbol); a plain by-name import binds under the same name.
         let member = make_short_import_member("ProcessPrng", "bcryptprimitives.dll");
         let entry = decode_short_import(&member).expect("must decode a short-import member");
         assert_eq!(entry.symbol, "ProcessPrng");
         assert_eq!(entry.dll, "bcryptprimitives.dll");
         assert!(
-            !entry.by_ordinal,
-            "make_short_import_member imports by name"
+            matches!(&entry.import, Import::Name(n) if n == "ProcessPrng"),
+            "a plain import binds by its own name"
         );
 
         // A regular COFF object is not a short-import member.
         assert!(decode_short_import(&make_def_object(RING_SYM)).is_none());
+    }
+
+    #[test]
+    fn short_import_member_decodes_ordinal_and_exportas() {
+        // An ordinal import carries no name; the ordinal drives the binding.
+        let ord = make_short_import(
+            "Foo",
+            "some.dll",
+            7,
+            object::pe::IMPORT_OBJECT_ORDINAL,
+            None,
+        );
+        let entry = decode_short_import(&ord).expect("decode ordinal import");
+        assert!(matches!(entry.import, Import::Ordinal(7)));
+
+        // An EXPORTAS import binds under a DLL-side name distinct from the symbol.
+        let exportas = make_short_import(
+            "LocalName",
+            "some.dll",
+            0,
+            object::pe::IMPORT_OBJECT_NAME_EXPORTAS,
+            Some("RealExport"),
+        );
+        let entry = decode_short_import(&exportas).expect("decode EXPORTAS import");
+        assert_eq!(entry.symbol, "LocalName");
+        assert!(matches!(&entry.import, Import::Name(n) if n == "RealExport"));
     }
 
     /// Builds a COFF object whose only section is an import-directory section
