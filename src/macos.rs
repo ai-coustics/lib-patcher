@@ -1,7 +1,8 @@
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+use object::read::archive::ArchiveFile;
 
 /// macOS / iOS / tvOS / visionOS implementation: Uses ld -r + exported_symbols_list
 pub(crate) fn patch_macos(
@@ -25,42 +26,35 @@ pub(crate) fn patch_macos(
     let intermediate = out_dir.join(format!("{}_temp.o", lib_name));
     let final_obj = out_dir.join(format!("{}_final.o", lib_name));
 
-    // Step 1: Extract all object files from archive
+    // Step 1: Extract every archive member to its own index-named file.
+    //
+    // `ar x` extracts members under their own names into one directory, so two
+    // members sharing a base name (e.g. a `foo.o` from each of two bundled C
+    // deps) silently overwrite each other and one object's symbols never reach
+    // `ld -r`. Read the members via the object crate and write each to a unique
+    // `<idx>.o` instead, mirroring the Windows path.
     fs::create_dir_all(&temp_obj_dir).expect("Failed to create temp object directory");
 
-    let static_lib_abs = if static_lib.is_absolute() {
-        static_lib.to_path_buf()
-    } else {
-        env::current_dir()
-            .expect("Failed to get current directory")
-            .join(static_lib)
-    };
-
     eprintln!("Extracting objects from archive...");
-    let extract_status = Command::new("ar")
-        .arg("x")
-        .arg(&static_lib_abs)
-        .current_dir(&temp_obj_dir)
-        .status()
-        .expect("Failed to run ar extract");
+    let archive_bytes = fs::read(static_lib).expect("Failed to read static lib");
+    let archive = ArchiveFile::parse(&*archive_bytes)
+        .unwrap_or_else(|e| panic!("Failed to parse static lib as archive: {}", e));
 
-    if !extract_status.success() {
-        panic!("ar extract failed");
+    let mut obj_files = Vec::new();
+    for member in archive.members() {
+        let member = member.expect("Failed to read archive member");
+        // Skip the archive symbol table and extended-name members.
+        let name = String::from_utf8_lossy(member.name());
+        if name == "/" || name == "//" || name.starts_with("__.SYMDEF") {
+            continue;
+        }
+        let data = member
+            .data(&*archive_bytes)
+            .expect("Failed to read archive member data");
+        let obj_path = temp_obj_dir.join(format!("{}.o", obj_files.len()));
+        fs::write(&obj_path, data).expect("Failed to write object file");
+        obj_files.push(obj_path);
     }
-
-    // Collect all extracted object files
-    let obj_files: Vec<_> = fs::read_dir(&temp_obj_dir)
-        .expect("Failed to read temp object directory")
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("o") {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect();
 
     if obj_files.is_empty() {
         panic!("No object files found in archive");
