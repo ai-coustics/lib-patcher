@@ -332,6 +332,106 @@ fn build_renames(
     renames
 }
 
+/// Rewrites the rename map into every COFF member and returns the files to feed
+/// the final librarian: individual patched objects, or a single rewritten
+/// archive when the rename could be batched.
+///
+/// A lib.exe-style librarian merges a `.lib` input, so the members can be staged
+/// into one archive and rewritten with a single `llvm-objcopy` call rather than
+/// forking objcopy once per member (hundreds to thousands for a real staticlib).
+/// `llvm-ar` cannot merge a `.lib`, and a batched objcopy fails atomically, so
+/// fall back to the per-object pass (which keeps a member unrenamed when objcopy
+/// chokes on it) in those cases.
+fn rename_coff_objects(
+    objcopy: &Path,
+    renames_path: &Path,
+    temp_dir: &Path,
+    coff_objs: &[(usize, PathBuf)],
+    lib_cmd: &WindowsLibTool,
+) -> Vec<PathBuf> {
+    if !lib_cmd.is_llvm
+        && !coff_objs.is_empty()
+        && let Some(patched) = batch_rename_coff(objcopy, renames_path, temp_dir, coff_objs, lib_cmd)
+    {
+        return vec![patched];
+    }
+    rename_coff_individually(objcopy, renames_path, temp_dir, coff_objs)
+}
+
+/// Stages the COFF members into one archive with the librarian and rewrites it in
+/// a single objcopy pass. Returns the rewritten archive, or `None` if either step
+/// fails (the caller then falls back to per-object rewriting).
+fn batch_rename_coff(
+    objcopy: &Path,
+    renames_path: &Path,
+    temp_dir: &Path,
+    coff_objs: &[(usize, PathBuf)],
+    lib_cmd: &WindowsLibTool,
+) -> Option<PathBuf> {
+    // Run from temp_dir with bare filenames so the staged archive stores relative
+    // member names (see the reproducibility note in patch_windows).
+    let mut cmd = Command::new(&lib_cmd.tool);
+    cmd.current_dir(temp_dir).arg("/nologo");
+    if let Some(machine) = &lib_cmd.machine_type {
+        cmd.arg(format!("/MACHINE:{}", machine));
+    }
+    cmd.arg("/OUT:coff_stage.lib");
+    for (_, obj) in coff_objs {
+        cmd.arg(obj.file_name().expect("COFF object has no file name"));
+    }
+    if !cmd.status().ok()?.success() {
+        eprintln!("Staging COFF members failed; falling back to per-object rename.");
+        return None;
+    }
+
+    let staged = temp_dir.join("coff_stage.lib");
+    let patched = temp_dir.join("coff_patched.lib");
+    let ok = Command::new(objcopy)
+        .arg(format!("--redefine-syms={}", renames_path.display()))
+        .arg(&staged)
+        .arg(&patched)
+        .status()
+        .ok()?
+        .success();
+    if ok {
+        Some(patched)
+    } else {
+        eprintln!("Batched llvm-objcopy failed; falling back to per-object rename.");
+        None
+    }
+}
+
+/// Rewrites each COFF member with its own objcopy invocation. A member objcopy
+/// cannot rewrite is kept unrenamed (valid COFF, just not renamed) so its code is
+/// preserved; lib.exe handles plain COFF fine.
+fn rename_coff_individually(
+    objcopy: &Path,
+    renames_path: &Path,
+    temp_dir: &Path,
+    coff_objs: &[(usize, PathBuf)],
+) -> Vec<PathBuf> {
+    let mut patched_files = Vec::new();
+    for (i, obj_path) in coff_objs {
+        let patched_path = temp_dir.join(format!("{}_patched.obj", i));
+        let status = Command::new(objcopy)
+            .arg(format!("--redefine-syms={}", renames_path.display()))
+            .arg(obj_path)
+            .arg(&patched_path)
+            .status()
+            .expect("Failed to execute llvm-objcopy");
+        if status.success() {
+            patched_files.push(patched_path);
+        } else {
+            eprintln!(
+                "Warning: llvm-objcopy failed on COFF object {}; keeping it unrenamed.",
+                i
+            );
+            patched_files.push(obj_path.clone());
+        }
+    }
+    patched_files
+}
+
 /// Windows implementation: Renames symbols using llvm-objcopy on extracted objects
 pub(crate) fn patch_windows(
     static_lib: &Path,
@@ -412,60 +512,33 @@ pub(crate) fn patch_windows(
     let has_imports = obj_files.iter().any(|(_, kind)| kind.is_import_member());
     let lib_cmd = get_windows_lib_tool(Some(target_arch), has_imports);
 
-    // Step 3: Run llvm-objcopy on EACH object
+    // Step 3: Rename symbols in the COFF members.
     let objcopy = find_objcopy_tool();
     eprintln!("Using objcopy: {}", objcopy.display());
-    eprintln!("Renaming symbols in objects...");
 
-    let mut patched_files = Vec::new();
-    // Short-import members are decoded here; their import libraries are
-    // regenerated below (see regenerate_import_libs). Descriptor members are
-    // dropped, the regenerated .libs carry fresh ones.
+    // First pass: decode the DLL short-import members (their import libraries are
+    // regenerated below; descriptor members are dropped, the regenerated .libs
+    // carry fresh ones) and collect the renamable COFF members. Non-COFF members
+    // (LLVM bitcode) are dropped: archiving them can crash lib.exe. See MemberKind.
     let mut import_entries: Vec<ImportEntry> = Vec::new();
-
+    let mut coff_objs: Vec<(usize, PathBuf)> = Vec::new();
     for (i, (obj_path, kind)) in obj_files.iter().enumerate() {
         match kind {
-            // Non-COFF members (LLVM bitcode): nothing to rename, and archiving
-            // them can crash lib.exe. See MemberKind.
-            MemberKind::Other => {
-                eprintln!("Skipping non-COFF object {} (not archived).", i);
-                continue;
-            }
+            MemberKind::Other => eprintln!("Skipping non-COFF object {} (not archived).", i),
             MemberKind::ShortImport => {
                 let data = fs::read(obj_path).expect("Failed to re-read import member");
                 match decode_short_import(&data) {
                     Some(entry) => import_entries.push(entry),
                     None => eprintln!("Warning: could not decode short-import member {}.", i),
                 }
-                continue;
             }
-            // Dropped; regenerated from the short-import members below.
-            MemberKind::ImportDescriptor => continue,
-            MemberKind::Coff => {}
-        }
-
-        let patched_path = temp_dir.join(format!("{}_patched.obj", i));
-
-        let status = Command::new(&objcopy)
-            .arg(format!("--redefine-syms={}", renames_path.display()))
-            .arg(obj_path)
-            .arg(&patched_path)
-            .status()
-            .expect("Failed to execute llvm-objcopy");
-
-        if status.success() {
-            patched_files.push(patched_path);
-        } else {
-            // A genuine COFF object objcopy couldn't rewrite: keep the original
-            // (valid COFF, just unrenamed) so its code is preserved. lib.exe
-            // handles COFF fine, so this won't crash the librarian.
-            eprintln!(
-                "Warning: llvm-objcopy failed on COFF object {}; keeping it unrenamed.",
-                i
-            );
-            patched_files.push(obj_path.clone());
+            MemberKind::ImportDescriptor => {}
+            MemberKind::Coff => coff_objs.push((i, obj_path.clone())),
         }
     }
+
+    eprintln!("Renaming symbols in {} COFF objects...", coff_objs.len());
+    let patched_files = rename_coff_objects(&objcopy, &renames_path, &temp_dir, &coff_objs, &lib_cmd);
 
     // Step 4: Regenerate import libraries. A librarian that lacks `/def:`
     // (llvm-ar) cannot rebuild them, so we would have to drop every decoded
