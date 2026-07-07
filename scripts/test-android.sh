@@ -133,10 +133,14 @@ run_full_matrix() {
 
   local built_bin="tests/rust-consumer/target/${target}/release/rust-consumer"
 
-  for profile in release release-lto; do
-    build=$([ "$profile" = release ] && echo non-lto || echo lto)
-    lib_dir="$PWD/tests/testlib/target/${target}/${profile}"
-    for tc in stable beta; do
+  # Toolchain is the outer loop: the rust-consumer target dir is shared across
+  # toolchains, and switching rustc versions invalidates every dependency
+  # fingerprint, so grouping by toolchain does one stable->beta switch instead
+  # of alternating (which forces a full dependency recompile each time).
+  for tc in stable beta; do
+    for profile in release release-lto; do
+      build=$([ "$profile" = release ] && echo non-lto || echo lto)
+      lib_dir="$PWD/tests/testlib/target/${target}/${profile}"
       # Patched: always expected to link; stage the binary to run on the emulator.
       if TESTLIB_LIB_DIR="$lib_dir" TESTLIB_PROFILE="$profile" \
          cargo +$tc build --manifest-path tests/rust-consumer/Cargo.toml \

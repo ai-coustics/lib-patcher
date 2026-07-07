@@ -278,6 +278,7 @@ fn matches_keep_prefix(name: &str, keep_prefix: &str) -> bool {
 
 // Platform-specific implementations
 mod android;
+mod elf;
 mod linux;
 mod macos;
 mod windows;

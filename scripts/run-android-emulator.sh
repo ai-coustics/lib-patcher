@@ -26,8 +26,10 @@ for exe in "$STAGE_DIR"/*; do
   adb shell "chmod 755 ${DEVICE_DIR}/${name}"
 
   # adb shell exit-code propagation is unreliable across versions, so append an
-  # explicit marker and parse it out of the captured output.
-  out=$(adb shell "${DEVICE_DIR}/${name}; echo EXIT:\$?")
+  # explicit marker and parse it out of the captured output. The `|| true` keeps
+  # `set -e` from aborting the whole loop on the versions that DO forward a
+  # non-zero exit: we want to record the failure and keep testing the rest.
+  out=$(adb shell "${DEVICE_DIR}/${name}; echo EXIT:\$?") || true
   echo "$out"
   code=$(printf '%s\n' "$out" | sed -n 's/.*EXIT:\([0-9][0-9]*\).*/\1/p' | tail -n1)
 
