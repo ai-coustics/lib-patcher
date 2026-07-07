@@ -97,6 +97,42 @@ cargo build
 ( cd tests/rust-consumer && cargo +beta run --release && cargo +stable run --release )
 ```
 
+#### Android
+
+Android patching is tested inside the published NDK image. From the repository
+root, run:
+
+```bash
+docker pull ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25
+
+docker run --rm \
+  -v "$PWD":/project \
+  -w /project \
+  ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25 \
+  bash scripts/test-android.sh
+```
+
+The script builds `tests/testlib` for all supported Android Rust targets
+(`aarch64-linux-android`, `armv7-linux-androideabi`, `i686-linux-android`, and
+`x86_64-linux-android`), patches each archive with `--triplet`, verifies the
+public API is intact and no non-API globals remain, and links the C consumer
+with the corresponding NDK clang wrapper.
+
+For `x86_64-linux-android` it additionally runs the same consumer matrix as the
+desktop platforms: `{release, release-lto} x {stable, beta} x {patched,
+unpatched}`. The unpatched cells follow the Linux column of the table above
+(Android is ELF + lld). The patched executables (the C consumer and the four
+Rust-consumer cells) are staged into `android-artifacts/` so they can be run.
+
+The build container has no emulator, so the run itself happens in a second CI
+job (`android-run`) that boots a KVM-accelerated x86_64 emulator and executes
+each staged binary via `adb`, asserting exit code 0 and the "All tests passed!"
+line, exactly like the desktop jobs. Running the binaries locally therefore
+needs an Android emulator or device; `scripts/run-android-emulator.sh` does the
+`adb push`/run/check against whatever emulator is reachable. arm64 execution is
+intentionally not attempted on the x86 host (software emulation is too slow); it
+would need a native arm runner.
+
 #### Windows
 
 Run from a Visual Studio Developer PowerShell so that `cl.exe` and `lib.exe`
@@ -139,6 +175,7 @@ Tests run automatically on:
 - Ubuntu (Linux x86_64)
 - macOS (`macos-latest`, Apple silicon)
 - Windows (x86_64)
+- Android NDK in `ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25`
 
 See `.github/workflows/test.yml` for the full CI configuration.
 
@@ -152,4 +189,6 @@ See `.github/workflows/test.yml` for the full CI configuration.
 - **Load-bearing patching**: the *unpatched* archive is linked too and must fail
   where the table says it fails, so the patched cells cannot silently pass for the
   wrong reason.
-- **Platform coverage**: Linux, macOS, and Windows.
+- **Platform coverage**: Linux, macOS, and Windows, plus Android (all four ABIs
+  cross-compiled, patched and linked; the x86_64 ABI additionally runs the full
+  consumer matrix on an emulator).

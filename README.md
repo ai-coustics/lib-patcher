@@ -46,7 +46,7 @@ lib-patcher \
 - `--input, -i`: Path to input static library (required)
 - `--output, -o`: Path to output patched library (required when patching)
 - `--keep-prefix, -k`: Prefix for symbols to keep public (required when patching)
-- `--triplet, -T`: Full Rust target triplet (e.g. `x86_64-pc-windows-gnullvm`, `aarch64-apple-ios`). Needed when cross-compiling: it selects the platform code path and the correct Apple platform version. Without it the host OS is assumed.
+- `--triplet, -T`: Full Rust target triplet (e.g. `x86_64-pc-windows-gnullvm`, `aarch64-apple-ios`, `aarch64-linux-android`). Needed when cross-compiling: it selects the platform code path and the correct Apple platform version/Android NDK tooling. Without it the host OS is assumed.
 - `--name, -n`: Base name for temporary files (optional, default: "lib")
 - `--temp-dir, -t`: Directory for temporary files (optional)
 - `--list, -l`: List all public symbols instead of patching
@@ -109,6 +109,9 @@ fn main() {
   sufficient: it archives but cannot rename symbols.
 - **macOS**: `ld`, `nm`, `ar` (Xcode Command Line Tools)
 - **Linux**: `ld`, `objcopy`, `readelf`, `ar` or `llvm-ar`
+- **Android**: Android NDK LLVM tools (`ld.lld`, `llvm-readelf`,
+  `llvm-objcopy`, `llvm-ar`). Set `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`,
+  or `NDK_HOME` to the NDK root.
 
 ## How It Works
 
@@ -120,6 +123,13 @@ fn main() {
 3. Filters to find symbols that don't match the prefix
 4. Uses `objcopy --localize-symbols` (names passed in a file) to make them local/private
 5. Creates final archive with `ar`
+
+#### Android
+1. Selects the Android NDK from `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`, or `NDK_HOME`
+2. Links all objects with NDK `ld.lld -r` into a single intermediate ELF object
+3. Uses NDK `llvm-readelf` to extract all GLOBAL and WEAK defined symbols
+4. Uses NDK `llvm-objcopy --localize-symbols` to make non-API symbols local/private
+5. Creates the final archive with NDK `llvm-ar`
 
 #### macOS
 1. Extracts all object files from the archive
@@ -141,7 +151,7 @@ fn main() {
 Everything except your public API (symbols starting with the keep-prefix) is taken
 out of the way:
 
-- On **Linux/macOS** non-matching symbols are localized so they are no longer
+- On **Linux/macOS/Android** non-matching symbols are localized so they are no longer
   externally visible.
 - On **Windows** non-matching symbols are renamed under the keep-prefix instead of
   localized (COFF makes localizing weak/COMDAT symbols unsafe), which removes the
@@ -172,17 +182,20 @@ Whether an unpatched library actually breaks the link depends on the platform:
 Integration tests build a Rust static library with real dependencies (rand,
 serde, serde_json), patch it to keep only its handful of public API functions
 while hiding the thousands of stdlib and dependency symbols, then link it from
-both C and Rust consumers on Linux, macOS, and Windows. The Rust consumer pulls
-in its own copies of the same dependencies, so it links cleanly only because
-patching hid the library's copies.
+both C and Rust consumers on Linux, macOS, and Windows. Android is covered by a
+Docker/NDK smoke test that builds the same library for all Android Rust targets,
+patches each archive, and links a C consumer with the NDK clang wrappers. The
+Rust consumer pulls in its own copies of the same dependencies, so it links
+cleanly only because patching hid the library's copies.
 
 To prove those tests are load-bearing, the same consumer also links the
 *unpatched* archive and asserts it fails with duplicate-symbol errors where it
 must.
 
 See [`tests/README.md`](tests/README.md) for the test layout, the full
-patched/unpatched link matrix, and step-by-step build instructions per platform,
-and [`.github/workflows/test.yml`](.github/workflows/test.yml) for the CI runs.
+patched/unpatched link matrix, Android Docker smoke-test instructions, and
+step-by-step build instructions per platform, and
+[`.github/workflows/test.yml`](.github/workflows/test.yml) for the CI runs.
 
 ## Inspiration
 

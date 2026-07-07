@@ -6,7 +6,93 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
+  # Cross-compile testlib for every Android ABI, patch each archive, link the C
+  # consumer, and run the full consumer matrix (both build styles x stable/beta x
+  # patched/unpatched) for the x86_64 ABI. The build container has no emulator,
+  # so it stages the patched x86_64 executables as an artifact for android-run.
+  android-build:
+    name: Android NDK build + patch + link
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ai-coustics/sdk-crossbuild:android-ndk25
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      CARGO_HOME: /root/.cargo
+      RUSTUP_HOME: /root/.rustup
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build, patch, link and run the Android consumer matrix
+        shell: bash
+        run: bash scripts/test-android.sh
+
+      - name: Upload patched Android executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-executables
+          path: android-artifacts/
+          if-no-files-found: error
+
+  # Actually execute the patched x86_64 binaries on a KVM-accelerated emulator so
+  # the Android job proves the patched library runs correctly (same and different
+  # toolchain), not just that it links. arm64 execution would need a native arm
+  # runner; software-emulating it here would be too slow, so it is left out.
+  android-run:
+    name: Android x86_64 emulator run
+    needs: android-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download patched Android executables
+        uses: actions/download-artifact@v4
+        with:
+          name: android-executables
+          path: android-artifacts
+
+      # The emulator needs ~7.4 GB free for its userdata partition and the base
+      # runner disk is nearly full, so reclaim a few GB by deleting preinstalled
+      # tooling this job never uses. Do NOT touch /usr/local/lib/android - the
+      # emulator and system images live there.
+      - name: Free disk space
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc /usr/local/.ghcup
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium /usr/local/share/chrome
+          sudo docker image prune --all --force || true
+          echo "Disk after cleanup:"; df -h /
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # "aosp_atd" is the headless, Play-services-free Automated Test Device image
+      # built for CI; it needs no GUI or Google APIs, which is all we need to run
+      # a native binary. On the 2-core runner it cold-boots in ~35s vs ~70s for
+      # api-33 google_apis.
+      - name: Run patched binaries on x86_64 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: aosp_atd
+          emulator-boot-timeout: 900
+          script: bash scripts/run-android-emulator.sh
+
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
