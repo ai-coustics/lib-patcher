@@ -1,0 +1,21 @@
+[package]
+name = "producer-a"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "producer_a"
+crate-type = ["staticlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# LTO folds the std runtime symbols (rust_eh_personality, the panic/alloc
+# machinery, ...) into the crate's own object instead of leaving them in
+# separate archive members. That object must be pulled to satisfy the public
+# API, so two such staticlibs both define those std symbols and collide at link
+# time. This is the same trigger the main test suite calls "release-lto".
+[profile.release]
+lto = true
