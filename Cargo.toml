@@ -7,7 +7,13 @@ description = "Cross-platform symbol filtering for Rust static libraries to prev
 readme = "README.md"
 repository = "https://github.com/ai-coustics/lib-patcher"
 license = "MIT OR Apache-2.0"
-keywords = ["static-library", "linking", "symbol-filtering", "build-tools", "ffi"]
+keywords = [
+  "static-library",
+  "linking",
+  "symbol-filtering",
+  "build-tools",
+  "ffi",
+]
 categories = ["development-tools::build-utils", "development-tools::ffi"]
 
 [dependencies]
