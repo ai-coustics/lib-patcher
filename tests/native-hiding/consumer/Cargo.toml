@@ -1,0 +1,10 @@
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# No dependencies of its own: the collision we are demonstrating is between the
+# two producer staticlibs (each embedding std), not between a producer and the
+# consumer's own copy of a crate.
+[dependencies]
