@@ -1,7 +1,6 @@
 [package]
 name = "lib-patcher"
 version = "0.2.0"
-publish = false
 edition = "2024"
 authors = ["Stephan Eckes <stephan.eckes@ai-coustics.com>"]
 description = "Cross-platform symbol filtering for Rust static libraries to prevent linking conflicts"
