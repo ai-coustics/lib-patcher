@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-source:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    outputs:
+      release-notes: ${{ steps.changelog.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require tagged commit to be on main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::Release tags must point to a commit on main."
+            exit 1
+          fi
+      - name: Extract release notes
+        id: changelog
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import uuid
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          changelog = Path("CHANGELOG.md").read_text()
+          sections = re.split(r"^## +([^\n]+)\n", changelog, flags=re.MULTILINE)
+          matches = [
+              sections[index + 1].strip()
+              for index in range(1, len(sections), 2)
+              if re.fullmatch(rf"{re.escape(tag)} - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}", sections[index].strip())
+          ]
+          if len(matches) != 1 or not matches[0]:
+              raise SystemExit(f"CHANGELOG.md must contain exactly one nonempty '## {tag} - YYYY-MM-DD' section")
+          delimiter = uuid.uuid4().hex
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"notes<<{delimiter}\n{matches[0]}\n{delimiter}\n")
+          PY
+
+  publish:
+    name: Publish to crates.io
+    needs: validate-source
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+              raise SystemExit(f"Expected a bare MAJOR.MINOR.PATCH tag, got {tag!r}")
+          package = tomllib.loads(Path("Cargo.toml").read_text())["package"]
+          if tag != package["version"]:
+              raise SystemExit(f"Tag {tag!r} does not match Cargo.toml version {package['version']!r}")
+          PY
+      - name: Verify package
+        run: cargo publish --locked --dry-run
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
+
+  github-release:
+    name: Create GitHub release
+    needs: [validate-source, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # GitHub automatically attaches source archives (.zip and .tar.gz).
+      - name: Create release with changelog notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_NOTES: ${{ needs.validate-source.outputs.release-notes }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes "$RELEASE_NOTES"
+          fi

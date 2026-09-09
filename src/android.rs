@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use crate::elf::{patch_elf, ElfToolchain};
+use crate::elf::{ElfToolchain, patch_elf};
 
 /// Android implementation: ELF symbol filtering using the Android NDK LLVM tools.
 ///
@@ -33,7 +33,14 @@ pub(crate) fn patch_android(
         label: "Android",
     };
 
-    patch_elf(static_lib, out_dir, lib_name, keep_prefix, final_lib, &tools);
+    patch_elf(
+        static_lib,
+        out_dir,
+        lib_name,
+        keep_prefix,
+        final_lib,
+        &tools,
+    );
 }
 
 struct AndroidToolchain {

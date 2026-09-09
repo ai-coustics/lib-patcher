@@ -1,0 +1,84 @@
+name: Quality Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep every multi-workspace check in sync.
+  QUALITY_WORKSPACES: |
+    .
+    tests/testlib
+    tests/rust-consumer
+
+jobs:
+  cargo-fmt:
+    name: Code Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: |
+          for workspace in $QUALITY_WORKSPACES; do
+            cargo fmt --manifest-path "$workspace/Cargo.toml" --all -- --check
+          done
+
+  taplo-fmt:
+    name: TOML Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: uncenter/setup-taplo@v1
+      - run: taplo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: |
+          for workspace in $QUALITY_WORKSPACES; do
+            cargo clippy --manifest-path "$workspace/Cargo.toml" --workspace --all-targets --all-features -- -D warnings
+          done
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          for workspace in $QUALITY_WORKSPACES; do
+            cargo doc --manifest-path "$workspace/Cargo.toml" --workspace --all-features --no-deps
+          done
+
+  unused-dependencies:
+    name: Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-shear
+      - run: |
+          for workspace in $QUALITY_WORKSPACES; do
+            (cd "$workspace" && cargo shear)
+          done
