@@ -76,7 +76,7 @@ lib-patcher --input libmylib.a --list
 
 ### As a Rust Library (build.rs)
 
-Add `lib-patchet` as a build dependency to your project:
+Add `lib-patcher` as a build dependency to your project:
 
 ```sh
 cargo add --build lib-patcher
