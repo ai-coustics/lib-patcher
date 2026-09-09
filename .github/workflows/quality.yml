@@ -16,7 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep every multi-workspace check and the shared cache in sync.
+  # Keep every multi-workspace check in sync.
   QUALITY_WORKSPACES: |
     .
     tests/testlib
@@ -31,7 +31,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # Formatting does not compile anything, so no cache is needed.
       - run: |
           for workspace in $QUALITY_WORKSPACES; do
             cargo fmt --manifest-path "$workspace/Cargo.toml" --all -- --check
@@ -53,12 +52,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ env.QUALITY_WORKSPACES }}
-          shared-key: quality
-          # Only Clippy on main writes the shared cache.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           for workspace in $QUALITY_WORKSPACES; do
             cargo clippy --manifest-path "$workspace/Cargo.toml" --workspace --all-targets --all-features -- -D warnings
@@ -70,11 +63,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ env.QUALITY_WORKSPACES }}
-          shared-key: quality
-          save-if: false
       - env:
           RUSTDOCFLAGS: -D warnings
         run: |
