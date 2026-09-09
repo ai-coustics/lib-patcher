@@ -29,7 +29,7 @@ error: duplicate symbol: serde_json::ser::indent
 #### Install
 
 ```sh
-cargo install --git ssh://git@github.com/ai-coustics/lib-patcher.git lib-patcher
+cargo install lib-patcher
 ```
 
 #### Basic Usage
@@ -76,7 +76,13 @@ lib-patcher --input libmylib.a --list
 
 ### As a Rust Library (build.rs)
 
-Use it programmatically in your `build.rs`:
+Add `lib-patchet` as a build dependency to your project:
+
+```sh
+cargo add --build lib-patcher
+```
+
+Then use it programmatically in your `build.rs`:
 
 ```rust
 use lib_patcher::patch_lib;
