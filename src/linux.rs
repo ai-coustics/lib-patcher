@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::elf::{patch_elf, ElfToolchain};
+use crate::elf::{ElfToolchain, patch_elf};
 
 /// Linux implementation: uses readelf + objcopy (the shared ELF routine) to
 /// localize symbols, resolving native or GNU cross tools for the target arch.
@@ -27,7 +27,14 @@ pub(crate) fn patch_linux(
         label: "Linux",
     };
 
-    patch_elf(static_lib, out_dir, lib_name, keep_prefix, final_lib, &tools);
+    patch_elf(
+        static_lib,
+        out_dir,
+        lib_name,
+        keep_prefix,
+        final_lib,
+        &tools,
+    );
 }
 
 /// Maps a target architecture to its GNU cross-toolchain triplet prefix
