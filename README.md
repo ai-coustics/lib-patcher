@@ -82,7 +82,14 @@ Add `lib-patcher` as a build dependency to your project:
 cargo add --build lib-patcher
 ```
 
-Then use it programmatically in your `build.rs`:
+Use it in your `build.rs` to patch an **already compiled external static library**
+before linking it into your crate. In the example below, `vendor/libthirdparty.a`
+must already exist.
+
+This does **not** patch the library produced by the current crate: Cargo runs
+`build.rs` before compiling that crate, so its output library is not available yet.
+To patch your own crate's static library, first build it, then use the
+[CLI tool](#as-a-cli-tool-post-build) as a separate post-build step.
 
 ```rust
 use lib_patcher::patch_lib;
