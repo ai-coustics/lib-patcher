@@ -85,7 +85,7 @@ jobs:
       # a native binary. On the 2-core runner it cold-boots in ~35s vs ~70s for
       # api-33 google_apis.
       - name: Run patched binaries on x86_64 emulator
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
         with:
           api-level: 30
           arch: x86_64
@@ -107,19 +107,19 @@ jobs:
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
       # The consumer is built with both toolchains (see tests/README.md). Install
       # stable last so it stays the default for the tool build, unit tests, and
       # testlib (which pins stable).
       - name: Install Rust beta
-        uses: dtolnay/rust-toolchain@beta
+        uses: dtolnay/rust-toolchain@75ef5f7374a49e8cd1c1287d38248c877096d1f0 # beta
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # testlib and the consumer are separate crates with their own target
           # dirs; list them so their deps are cached too.
