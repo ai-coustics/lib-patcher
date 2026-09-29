@@ -1,0 +1,18 @@
+[package]
+name = "producer-b"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "producer_b"
+crate-type = ["staticlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# See producer-a/Cargo.toml: LTO folds std into the crate object so the two
+# staticlibs collide when linked together.
+[profile.release]
+lto = true

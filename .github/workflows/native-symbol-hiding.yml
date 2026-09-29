@@ -1,0 +1,51 @@
+name: Native symbol hiding (nightly rustc flags)
+
+# Experiment (not a gate on lib-patcher itself): does nightly rustc do
+# lib-patcher's job natively via -Zstaticlib-hide-internal-symbols
+# (rust#155338) and -Zstaticlib-rename-internal-symbols (rust#156950)?
+#
+# The job builds two Rust staticlibs that each embed std, then links both into
+# one Rust binary (see tests/native-hiding/). On Linux (ELF) it asserts the full
+# before/after: unpatched the link fails with duplicate symbols and internals
+# leak; with the flags it links, runs, and the internals are hidden + renamed.
+# On macOS (Apple) ld64 is first-definition-wins so the unpatched clash cannot
+# be reproduced; there it only asserts the flagged build links and runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-hiding:
+    name: Native symbol hiding on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # The two -Z flags are nightly-only. If a future nightly drops or renames
+      # them the script fails loudly at its "flags present" check.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tests/native-hiding/producer-a
+            tests/native-hiding/producer-b
+            tests/native-hiding/consumer
+
+      - name: Reproduce the two-staticlib clash and test the nightly flags
+        shell: bash
+        run: bash tests/native-hiding/run.sh
